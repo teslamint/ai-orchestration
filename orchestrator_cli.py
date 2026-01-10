@@ -1244,6 +1244,9 @@ def main(
     auto_fix: bool = typer.Option(
         False, "--auto-fix", help="리뷰 항목 자동 수정 (확인 없이)"
     ),
+    auto_select: bool = typer.Option(
+        False, "--auto-select", help="접근 방식 자동 선택 (기본값 또는 추천)"
+    ),
 ):
     """
     AI Orchestration Tool (6-Stage):
@@ -1362,13 +1365,17 @@ def main(
                 default_choice = idx
                 break
 
-    choice = typer.prompt(
-        "Enter the number of your choice",
-        type=int,
-        default=default_choice,
-    )
-    if DEBUG:
-        console.print(f"[dim]User selected option: {choice}[/dim]")
+    if auto_select:
+        choice = default_choice
+        console.print(f"[dim]Auto-selected option: {choice}[/dim]")
+    else:
+        choice = typer.prompt(
+            "Enter the number of your choice",
+            type=int,
+            default=default_choice,
+        )
+        if DEBUG:
+            console.print(f"[dim]User selected option: {choice}[/dim]")
 
     if 1 <= choice <= len(options):
         context.selected_approach = options[choice - 1]
