@@ -17,3 +17,6 @@ execution_logs/
 
 # IDE
 .idea/
+
+# Devcontainer secrets
+.devcontainer/.env

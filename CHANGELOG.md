@@ -7,9 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Devcontainer with security sandbox (network firewall)
+  - Python 3.13 + uv + Claude CLI + zsh pre-installed
+  - iptables-based firewall allowing only required domains
+  - API keys passed via `remoteEnv` from host environment
+- API direct call support (no CLI dependencies required)
+  - `gemini_api` - Google AI API (Gemini 2.0 Flash)
+  - `openai_api` - OpenAI API (GPT-4o)
+  - `anthropic_api` - Anthropic API (Claude Sonnet 4)
+  - Streaming output with Rich Live display
+- Optional API dependencies in `pyproject.toml` (`uv sync --extra api`)
 - Ruff linter and formatter configuration
 - Pre-commit hooks for automated code quality checks
 - Lint and format check steps in CI workflow
+
+### Changed
+- Stage functions now support both CLI-based and API-based tools
+- LLMToolFactory extended with `is_api_tool()` and `create_api_tool()` methods
 
 ## [0.3.0-preview] - 2025-01-10
 

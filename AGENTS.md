@@ -27,13 +27,23 @@
 | `--skip-review` | 코드 리뷰 단계 생략 | False |
 | `--max-fix-iterations` | 리뷰-수정 반복 횟수 | 1 |
 | `--debug` | 디버그 로그 출력 | False |
-| `--brainstormer` | Stage 1 도구 (gemini/codex/claude) | gemini |
-| `--reviewer` | Stage 2 도구 (gemini/codex/claude) | codex |
-| `--planner` | Stage 3 도구 (gemini/codex/claude) | codex |
-| `--executor` | Stage 4 도구 (gemini/codex/claude) | claude |
-| `--code-reviewer` | Stage 5 도구 (gemini/codex/claude) | codex |
-| `--fixer` | Stage 6 도구 (gemini/codex/claude) | claude |
+| `--brainstormer` | Stage 1 도구 | gemini |
+| `--reviewer` | Stage 2 도구 | codex |
+| `--planner` | Stage 3 도구 | codex |
+| `--executor` | Stage 4 도구 | claude |
+| `--code-reviewer` | Stage 5 도구 | codex |
+| `--fixer` | Stage 6 도구 | claude |
 | `--tool-config` | LLM 도구 설정 JSON 파일 | None |
+
+### Available Tool Types
+| Type | Description |
+|------|-------------|
+| `gemini` | Gemini CLI (requires `gemini` in PATH) |
+| `codex` | OpenAI Codex CLI (requires `codex` in PATH) |
+| `claude` | Claude CLI (requires `claude` in PATH) |
+| `gemini_api` | Google AI API (requires `GOOGLE_AI_API_KEY` env) |
+| `openai_api` | OpenAI API (requires `OPENAI_API_KEY` env) |
+| `anthropic_api` | Anthropic API (requires `ANTHROPIC_API_KEY` env) |
 
 ## Coding Style & Naming Conventions
 - Use 4-space indentation, PEP 8 naming (`snake_case` for functions/vars, `PascalCase` for classes).
@@ -112,9 +122,40 @@ uv run python orchestrator_cli.py "<goal>" --project-name test --skip-review --a
 - PRs should describe the user-facing impact, list commands run, and link related issues
 
 ## Configuration & Runtime Notes
-- The CLI expects external tools on PATH: `gemini`, `codex`, and `claude`.
+- CLI-based tools require binaries on PATH: `gemini`, `codex`, `claude`.
+- API-based tools require environment variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_AI_API_KEY`.
 - Default workspace is `./workspace`; each project gets isolated subdirectory.
 - Generated files stay inside `workspace/<project_name>/` unless explicitly requested.
+
+## Devcontainer (Security Sandbox)
+Use Devcontainer for isolated execution with network restrictions.
+
+### Setup
+```bash
+# VS Code: "Dev Containers: Reopen in Container"
+# Or use devcontainer CLI:
+devcontainer up --workspace-folder .
+```
+
+### Features
+- Python 3.13 + uv + Claude CLI pre-installed
+- Network firewall (only allowed domains: GitHub, PyPI, API endpoints)
+- zsh with powerline10k theme
+- API keys passed via `remoteEnv` in devcontainer.json
+
+### Environment Variables (Host)
+Set these on your host machine before starting the container:
+```bash
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
+export GOOGLE_AI_API_KEY=AI...
+```
+
+### API Dependencies
+```bash
+# Install API client libraries
+uv sync --extra api
+```
 
 ## CI/CD & GitHub Configuration
 

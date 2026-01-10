@@ -477,6 +477,50 @@ def _run_shell_command(
         raise RuntimeError(f"명령어 실행 실패: {e.stderr}")
 
 
+def _run_api_tool(
+    tool,
+    prompt: str,
+    stage: str = "",
+    system_prompt: str = "",
+) -> str:
+    """API 기반 LLM 도구 실행 (스트리밍 출력 지원)"""
+    from rich.live import Live
+    from rich.text import Text
+
+    if DEBUG:
+        console.print(f"[dim]Running API tool: {tool.__class__.__name__}[/dim]")
+        console.print(f"[dim]Prompt length: {len(prompt)} chars[/dim]")
+
+    console.print(
+        f"[bold blue]▶ {stage}[/bold blue] (API)"
+        if stage
+        else "[bold blue]▶ API Call[/bold blue]"
+    )
+
+    full_response = ""
+    try:
+        with Live(
+            Text(""), console=console, refresh_per_second=10, transient=True
+        ) as live:
+            for chunk in tool.generate_stream(prompt, system_prompt or None):
+                full_response += chunk
+                # Show last 500 chars to keep display manageable
+                display_text = (
+                    full_response[-500:] if len(full_response) > 500 else full_response
+                )
+                live.update(Text(display_text, style="dim"))
+                _append_debug_log_line(stage or "API", chunk.replace("\n", "\\n")[:100])
+    except Exception as e:
+        console.print(f"[bold red]API Error:[/bold red] {e}")
+        raise RuntimeError(f"API 호출 실패: {e}")
+
+    if DEBUG:
+        console.print(f"[dim]API response length: {len(full_response)} chars[/dim]")
+        _write_debug_log(f"{stage} API response", full_response)
+
+    return full_response.strip()
+
+
 def _write_debug_log(stage: str, content: str) -> None:
     if not DEBUG or DEBUG_LOG_PATH is None:
         return
@@ -644,12 +688,12 @@ def _generate_diff(old_content: str, new_content: str, file_path: str) -> str:
 def run_gemini_brainstorm(context: OrchestrationContext):
     """Stage 1: Brainstorming (configurable tool)"""
     config = get_config()
-    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.BRAINSTORMER)
+    tool_type = config.tool_config.get_tool_for_stage(StageRole.BRAINSTORMER)
 
     tooling_context = _detect_tooling(Path.cwd())
     if DEBUG:
         console.print(f"[dim]Tooling context: {tooling_context}[/dim]")
-        console.print(f"[dim]Using tool: {config.tool_config.brainstormer.value}[/dim]")
+        console.print(f"[dim]Using tool: {tool_type.value}[/dim]")
     prompt = AGENT_PROMPTS["brainstormer"]["user"].format(
         user_goal=context.user_goal,
         tooling_context=tooling_context,
@@ -657,9 +701,20 @@ def run_gemini_brainstorm(context: OrchestrationContext):
     if DEBUG:
         console.print("[dim]Brainstormer prompt prepared[/dim]")
 
-    cmd = tool.build_command(prompt, debug=DEBUG)
+    # API vs CLI tool branching
+    if LLMToolFactory.is_api_tool(tool_type):
+        tool = LLMToolFactory.create_api_tool(tool_type)
+        system_prompt = AGENT_PROMPTS["brainstormer"].get("system", "")
+        output = _run_api_tool(
+            tool, prompt, stage="BRAINSTORM", system_prompt=system_prompt
+        )
+    else:
+        tool = LLMToolFactory.get_tool_for_stage(
+            config.tool_config, StageRole.BRAINSTORMER
+        )
+        cmd = tool.build_command(prompt, debug=DEBUG)
+        output = _run_shell_command(cmd, stage="BRAINSTORM")
 
-    output = _run_shell_command(cmd, stage="BRAINSTORM")
     if DEBUG:
         output_preview = (
             output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
@@ -667,11 +722,11 @@ def run_gemini_brainstorm(context: OrchestrationContext):
         console.print(
             Panel(
                 output_preview,
-                title="Gemini raw output (preview)",
+                title="Brainstorm raw output (preview)",
                 border_style="cyan",
             )
         )
-        _write_debug_log("Gemini raw output", output)
+        _write_debug_log("Brainstorm raw output", output)
 
     # 결과 저장 (OrchestrationContext 필드에 맞게)
     context.brainstorming_ideas = output
@@ -680,12 +735,12 @@ def run_gemini_brainstorm(context: OrchestrationContext):
 def run_codex_brainstorm_review(context: OrchestrationContext):
     """Stage 2: Brainstorming Review (configurable tool)"""
     config = get_config()
-    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.REVIEWER)
+    tool_type = config.tool_config.get_tool_for_stage(StageRole.REVIEWER)
 
     tooling_context = _detect_tooling(Path.cwd())
     if DEBUG:
         console.print(f"[dim]Tooling context: {tooling_context}[/dim]")
-        console.print(f"[dim]Using tool: {config.tool_config.reviewer.value}[/dim]")
+        console.print(f"[dim]Using tool: {tool_type.value}[/dim]")
 
     prompt = AGENT_PROMPTS["brainstorming_reviewer"]["user"].format(
         user_goal=context.user_goal,
@@ -696,8 +751,17 @@ def run_codex_brainstorm_review(context: OrchestrationContext):
     if DEBUG:
         console.print("[dim]Reviewer prompt prepared[/dim]")
 
-    cmd = tool.build_command(prompt, debug=DEBUG)
-    output = _run_shell_command(cmd, stage="REVIEW")
+    # API vs CLI tool branching
+    if LLMToolFactory.is_api_tool(tool_type):
+        tool = LLMToolFactory.create_api_tool(tool_type)
+        system_prompt = AGENT_PROMPTS["brainstorming_reviewer"].get("system", "")
+        output = _run_api_tool(
+            tool, prompt, stage="REVIEW", system_prompt=system_prompt
+        )
+    else:
+        tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.REVIEWER)
+        cmd = tool.build_command(prompt, debug=DEBUG)
+        output = _run_shell_command(cmd, stage="REVIEW")
 
     if DEBUG:
         output_preview = (
@@ -706,11 +770,11 @@ def run_codex_brainstorm_review(context: OrchestrationContext):
         console.print(
             Panel(
                 output_preview,
-                title="Codex Brainstorm Review (preview)",
+                title="Brainstorm Review (preview)",
                 border_style="yellow",
             )
         )
-        _write_debug_log("Codex Brainstorm Review output", output)
+        _write_debug_log("Brainstorm Review output", output)
 
     # 결과 저장
     context.refined_brainstorming = output
@@ -728,12 +792,12 @@ def run_codex_brainstorm_review(context: OrchestrationContext):
 def run_codex_planning(context: OrchestrationContext):
     """Stage 3: Planning (configurable tool)"""
     config = get_config()
-    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.PLANNER)
+    tool_type = config.tool_config.get_tool_for_stage(StageRole.PLANNER)
 
     tooling_context = _detect_tooling(Path.cwd())
     if DEBUG:
         console.print(f"[dim]Tooling context: {tooling_context}[/dim]")
-        console.print(f"[dim]Using tool: {config.tool_config.planner.value}[/dim]")
+        console.print(f"[dim]Using tool: {tool_type.value}[/dim]")
 
     # refined_brainstorming이 있으면 사용, 없으면 원본 사용
     brainstorming_to_use = (
@@ -751,8 +815,16 @@ def run_codex_planning(context: OrchestrationContext):
     if DEBUG:
         console.print("[dim]Planner prompt prepared[/dim]")
 
-    cmd = tool.build_command(prompt, debug=DEBUG)
-    output = _run_shell_command(cmd, stage="PLAN")
+    # API vs CLI tool branching
+    if LLMToolFactory.is_api_tool(tool_type):
+        tool = LLMToolFactory.create_api_tool(tool_type)
+        system_prompt = AGENT_PROMPTS["planner"].get("system", "")
+        output = _run_api_tool(tool, prompt, stage="PLAN", system_prompt=system_prompt)
+    else:
+        tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.PLANNER)
+        cmd = tool.build_command(prompt, debug=DEBUG)
+        output = _run_shell_command(cmd, stage="PLAN")
+
     if DEBUG:
         output_preview = (
             output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
@@ -760,11 +832,11 @@ def run_codex_planning(context: OrchestrationContext):
         console.print(
             Panel(
                 output_preview,
-                title="Codex raw output (preview)",
+                title="Planner raw output (preview)",
                 border_style="green",
             )
         )
-        _write_debug_log("Codex raw output", output)
+        _write_debug_log("Planner raw output", output)
 
     # JSON Parsing 및 Pydantic Task 변환
     json_plan = _extract_json_list(output)
@@ -786,7 +858,7 @@ def run_claude_executor(
 ):
     """Stage 4: Executor (configurable tool, Self-Healing 및 diff 수집 포함)"""
     config = get_config()
-    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.EXECUTOR)
+    tool_type = config.tool_config.get_tool_for_stage(StageRole.EXECUTOR)
 
     # 파일 읽기 (수정 작업인 경우 기존 코드 필요)
     existing_code = ""
@@ -811,22 +883,36 @@ def run_claude_executor(
 
     # Self-Healing Loop
     current_prompt = prompt
+    is_api = LLMToolFactory.is_api_tool(tool_type)
     for attempt in range(max_retries + 1):
         if DEBUG:
             console.print(
                 f"[dim]Executor attempt {attempt + 1}/{max_retries + 1} "
                 f"for {task.action_type.value} {task.file_path} "
-                f"(using {config.tool_config.executor.value})[/dim]"
+                f"(using {tool_type.value})[/dim]"
             )
-        # 1. 실행
-        cmd = tool.build_command(current_prompt, debug=DEBUG)
-        if DEBUG:
-            console.print(f"[dim]Executor command: {cmd[0]} <prompt>[/dim]")
-        raw_output = _run_shell_command(
-            cmd,
-            stage=f"CLAUDE task {task.step_id}",
-            parse_stream_json=DEBUG,
-        )
+        # 1. 실행 (API vs CLI)
+        if is_api:
+            tool = LLMToolFactory.create_api_tool(tool_type)
+            system_prompt = AGENT_PROMPTS["executor"].get("system", "")
+            raw_output = _run_api_tool(
+                tool,
+                current_prompt,
+                stage=f"EXECUTOR task {task.step_id}",
+                system_prompt=system_prompt,
+            )
+        else:
+            tool = LLMToolFactory.get_tool_for_stage(
+                config.tool_config, StageRole.EXECUTOR
+            )
+            cmd = tool.build_command(current_prompt, debug=DEBUG)
+            if DEBUG:
+                console.print(f"[dim]Executor command: {cmd[0]} <prompt>[/dim]")
+            raw_output = _run_shell_command(
+                cmd,
+                stage=f"CLAUDE task {task.step_id}",
+                parse_stream_json=DEBUG,
+            )
         if DEBUG:
             output_preview = (
                 raw_output
@@ -979,9 +1065,7 @@ def execute_run_command(
 def run_codex_code_review(context: OrchestrationContext):
     """Stage 5: Code Review (configurable tool)"""
     config = get_config()
-    tool = LLMToolFactory.get_tool_for_stage(
-        config.tool_config, StageRole.CODE_REVIEWER
-    )
+    tool_type = config.tool_config.get_tool_for_stage(StageRole.CODE_REVIEWER)
 
     # 실행된 파일 목록 수집
     file_list = []
@@ -1055,12 +1139,21 @@ def run_codex_code_review(context: OrchestrationContext):
 
     if DEBUG:
         console.print("[dim]Code review prompt prepared[/dim]")
-        console.print(
-            f"[dim]Using tool: {config.tool_config.code_reviewer.value}[/dim]"
-        )
+        console.print(f"[dim]Using tool: {tool_type.value}[/dim]")
 
-    cmd = tool.build_command(prompt, debug=DEBUG)
-    output = _run_shell_command(cmd, stage="CODE_REVIEW")
+    # API vs CLI tool branching
+    if LLMToolFactory.is_api_tool(tool_type):
+        tool = LLMToolFactory.create_api_tool(tool_type)
+        system_prompt = AGENT_PROMPTS["code_reviewer"].get("system", "")
+        output = _run_api_tool(
+            tool, prompt, stage="CODE_REVIEW", system_prompt=system_prompt
+        )
+    else:
+        tool = LLMToolFactory.get_tool_for_stage(
+            config.tool_config, StageRole.CODE_REVIEWER
+        )
+        cmd = tool.build_command(prompt, debug=DEBUG)
+        output = _run_shell_command(cmd, stage="CODE_REVIEW")
 
     if DEBUG:
         output_preview = (
@@ -1193,7 +1286,7 @@ def run_claude_fixer(
 ):
     """Stage 6: Fixer (configurable tool, 리뷰 피드백 기반으로 코드 수정)"""
     config = get_config()
-    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.FIXER)
+    tool_type = config.tool_config.get_tool_for_stage(StageRole.FIXER)
 
     # 현재 파일 내용 읽기
     target_path = context.workspace_path / review_item.file_path
@@ -1225,21 +1318,35 @@ def run_claude_fixer(
     )
 
     current_prompt = prompt
+    is_api = LLMToolFactory.is_api_tool(tool_type)
     for attempt in range(max_retries + 1):
         if DEBUG:
             console.print(
                 f"[dim]Fixer attempt {attempt + 1}/{max_retries + 1} "
                 f"for review item {review_item.item_id} "
-                f"(using {config.tool_config.fixer.value})[/dim]"
+                f"(using {tool_type.value})[/dim]"
             )
 
-        cmd = tool.build_command(current_prompt, debug=DEBUG)
-
-        raw_output = _run_shell_command(
-            cmd,
-            stage=f"FIX item {review_item.item_id}",
-            parse_stream_json=DEBUG,
-        )
+        # API vs CLI tool branching
+        if is_api:
+            tool = LLMToolFactory.create_api_tool(tool_type)
+            system_prompt = AGENT_PROMPTS["fixer"].get("system", "")
+            raw_output = _run_api_tool(
+                tool,
+                current_prompt,
+                stage=f"FIX item {review_item.item_id}",
+                system_prompt=system_prompt,
+            )
+        else:
+            tool = LLMToolFactory.get_tool_for_stage(
+                config.tool_config, StageRole.FIXER
+            )
+            cmd = tool.build_command(current_prompt, debug=DEBUG)
+            raw_output = _run_shell_command(
+                cmd,
+                stage=f"FIX item {review_item.item_id}",
+                parse_stream_json=DEBUG,
+            )
 
         if DEBUG:
             _write_debug_log(

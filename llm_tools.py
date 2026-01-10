@@ -16,9 +16,14 @@ from typing import Optional
 class ToolType(str, Enum):
     """Supported LLM tool types."""
 
+    # CLI-based tools
     GEMINI = "gemini"
     CODEX = "codex"
     CLAUDE = "claude"
+    # API-based tools
+    GEMINI_API = "gemini_api"
+    OPENAI_API = "openai_api"
+    ANTHROPIC_API = "anthropic_api"
 
 
 class StageRole(str, Enum):
@@ -117,12 +122,38 @@ class LLMToolFactory:
         ToolType.CLAUDE: ClaudeTool,
     }
 
+    _api_tool_types: set[ToolType] = {
+        ToolType.GEMINI_API,
+        ToolType.OPENAI_API,
+        ToolType.ANTHROPIC_API,
+    }
+
+    @classmethod
+    def is_api_tool(cls, tool_type: ToolType) -> bool:
+        """Check if the tool type is API-based."""
+        return tool_type in cls._api_tool_types
+
     @classmethod
     def create(cls, tool_type: ToolType) -> BaseLLMTool:
         """Create an LLM tool instance for the given type."""
         tool_class = cls._tools.get(tool_type)
         if tool_class is None:
             raise ValueError(f"Unknown tool type: {tool_type}")
+        return tool_class()
+
+    @classmethod
+    def create_api_tool(cls, tool_type: ToolType):
+        """Create an API-based tool instance for the given type."""
+        from api_tools import AnthropicTool, GoogleAITool, OpenAITool
+
+        api_tools = {
+            ToolType.GEMINI_API: GoogleAITool,
+            ToolType.OPENAI_API: OpenAITool,
+            ToolType.ANTHROPIC_API: AnthropicTool,
+        }
+        tool_class = api_tools.get(tool_type)
+        if tool_class is None:
+            raise ValueError(f"Unknown API tool type: {tool_type}")
         return tool_class()
 
     @classmethod
