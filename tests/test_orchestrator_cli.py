@@ -55,3 +55,25 @@ def test_generate_diff_no_changes():
     content = "print('hello')\n"
     diff = _generate_diff(content, content, "test.py")
     assert diff == ""
+
+
+def test_main_has_auto_select_option():
+    """Verify --auto-select option is defined in main function."""
+    import inspect
+    from orchestrator_cli import main
+
+    sig = inspect.signature(main)
+    assert "auto_select" in sig.parameters
+    param = sig.parameters["auto_select"]
+    assert param.default.default is False
+
+
+def test_cli_auto_select_option_help():
+    """Verify --auto-select appears in CLI help."""
+    from typer.testing import CliRunner
+    from orchestrator_cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--help"])
+    assert "--auto-select" in result.output
+    assert "접근 방식 자동 선택" in result.output

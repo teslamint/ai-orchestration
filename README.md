@@ -76,7 +76,7 @@ uv run python orchestrator_cli.py "Build a database migration tool" --max-fix-it
 
 ```bash
 uv run python orchestrator_cli.py "Create unit tests for my project" \
-  --auto-run --auto-approve --auto-fix
+  --auto-select --auto-run --auto-approve --auto-fix
 ```
 
 ### 디버그 모드
@@ -98,6 +98,7 @@ uv run python orchestrator_cli.py "Refactor the authentication module" \
 | `--skip-review` | 코드 리뷰 단계(Stage 5-6) 건너뛰기 | `False` |
 | `--max-fix-iterations` | 최대 리뷰-수정 반복 횟수 | `1` |
 | `--auto-fix` | 리뷰 항목 자동 수정 (확인 없이) | `False` |
+| `--auto-select` | 접근 방식 자동 선택 (기본값 또는 추천) | `False` |
 
 ## 실행 흐름 예시
 

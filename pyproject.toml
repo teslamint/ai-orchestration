@@ -14,3 +14,8 @@ dependencies = [
 dev = [
     "pytest>=8.4.2",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+norecursedirs = ["workspace", "logs", "orchestrator_debug_logs", ".venv"]
