@@ -34,7 +34,7 @@ Gemini → Codex → Claude 6단계 워크플로우로, 사용자의 목표를 �
 
 ## 요구 사항
 
-- Python 3.13+
+- Python 3.9+
 - `gemini`, `codex`, `claude` CLI가 PATH에 있어야 합니다
 - (권장) `uv` 사용 환경
 
