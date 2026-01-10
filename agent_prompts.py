@@ -134,14 +134,15 @@ This plan will be executed by another AI agent, so the instructions for each ste
 8.  Do NOT add redundant "create directory" commands if file creation will already create parent directories.
 9.  If the user explicitly names a command (e.g., `uv add --dev pytest`), the plan MUST use that command and must NOT replace it with manual config edits or `uv sync` unless asked.
 10. For `run_command` steps, the `instruction` MUST be the exact command string only (no prose, no prefixes like "Run:" or "Install:").
-11. If you need to document a command, do it via an `edit_file` step targeting an existing doc (e.g., `README.md` or `AGENTS.md`).
+11. For `file_path`, use paths relative to the project directory (e.g., `main.py`, `src/utils.py`). Do NOT include a leading `workspace/` prefix; the orchestrator automatically handles the workspace directory.
+12. If you need to document a command, do it via an `edit_file` step targeting an existing doc (e.g., `README.md` or `AGENTS.md`).
 
 **JSON Schema for the `implementation_plan` (a list of Task objects):**
 ```json
 [
   {{
     "step_id": "integer, a sequential identifier for the step (e.g., 1, 2, 3...)",
-    "file_path": "string, the path of the file to be created or edited. Use '.' for commands that don't target a specific file.",
+    "file_path": "string, the path of the file to be created or edited, relative to the project directory (no `workspace/` prefix). Use '.' for commands that don't target a specific file.",
     "action_type": "string, must be one of the following exact values: 'create_file', 'edit_file', 'run_command', 'other'",
     "instruction": "string, a highly specific and detailed instruction for the executor AI for this single step. For 'edit_file', specify exactly what to add or change. For 'run_command', provide the exact command to execute."
   }}
