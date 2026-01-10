@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Ruff linter and formatter configuration
+- Pre-commit hooks for automated code quality checks
+- Lint and format check steps in CI workflow
+
 ## [0.3.0-preview] - 2025-01-10
 
 ### Added
