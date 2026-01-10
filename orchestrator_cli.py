@@ -19,6 +19,13 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from agent_prompts import AGENT_PROMPTS
+from llm_tools import (
+    LLMToolConfig,
+    LLMToolFactory,
+    StageRole,
+    load_tool_config,
+    validate_tool_config,
+)
 
 # --- 사용자 정의 모듈 Import ---
 # (orchestration_context.py, agent_prompts.py 파일이 같은 폴더에 있어야 합니다)
@@ -331,6 +338,7 @@ class OrchestratorConfig:
     debug_log_path: Optional[Path] = None
     workspace_path: Path = field(default_factory=lambda: Path("./workspace"))
     command_executor: Optional[CommandExecutor] = None
+    tool_config: LLMToolConfig = field(default_factory=LLMToolConfig)
 
 
 # Global config instance
@@ -634,23 +642,24 @@ def _generate_diff(old_content: str, new_content: str, file_path: str) -> str:
 
 
 def run_gemini_brainstorm(context: OrchestrationContext):
-    """Stage 1: Gemini 실행"""
-    # agent_prompts.py의 템플릿 사용
+    """Stage 1: Brainstorming (configurable tool)"""
+    config = get_config()
+    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.BRAINSTORMER)
+
     tooling_context = _detect_tooling(Path.cwd())
     if DEBUG:
         console.print(f"[dim]Tooling context: {tooling_context}[/dim]")
+        console.print(f"[dim]Using tool: {config.tool_config.brainstormer.value}[/dim]")
     prompt = AGENT_PROMPTS["brainstormer"]["user"].format(
         user_goal=context.user_goal,
         tooling_context=tooling_context,
     )
     if DEBUG:
-        console.print("[dim]Gemini prompt prepared[/dim]")
+        console.print("[dim]Brainstormer prompt prepared[/dim]")
 
-    # Gemini CLI 실행 (Markdown 출력을 위해 json 포맷 강제하지 않음, 필요시 조정)
-    # 템플릿에서 "Markdwon list format"을 요구하므로 텍스트로 받습니다.
-    cmd = [GEMINI_BIN, prompt]
+    cmd = tool.build_command(prompt, debug=DEBUG)
 
-    output = _run_shell_command(cmd, stage="GEMINI")
+    output = _run_shell_command(cmd, stage="BRAINSTORM")
     if DEBUG:
         output_preview = (
             output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
@@ -669,10 +678,14 @@ def run_gemini_brainstorm(context: OrchestrationContext):
 
 
 def run_codex_brainstorm_review(context: OrchestrationContext):
-    """Stage 2: Codex가 Gemini 브레인스토밍을 리뷰/정리"""
+    """Stage 2: Brainstorming Review (configurable tool)"""
+    config = get_config()
+    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.REVIEWER)
+
     tooling_context = _detect_tooling(Path.cwd())
     if DEBUG:
         console.print(f"[dim]Tooling context: {tooling_context}[/dim]")
+        console.print(f"[dim]Using tool: {config.tool_config.reviewer.value}[/dim]")
 
     prompt = AGENT_PROMPTS["brainstorming_reviewer"]["user"].format(
         user_goal=context.user_goal,
@@ -681,10 +694,10 @@ def run_codex_brainstorm_review(context: OrchestrationContext):
     )
 
     if DEBUG:
-        console.print("[dim]Codex brainstorm review prompt prepared[/dim]")
+        console.print("[dim]Reviewer prompt prepared[/dim]")
 
-    cmd = [CHATGPT_BIN, "exec", prompt]
-    output = _run_shell_command(cmd, stage="CODEX_REVIEW")
+    cmd = tool.build_command(prompt, debug=DEBUG)
+    output = _run_shell_command(cmd, stage="REVIEW")
 
     if DEBUG:
         output_preview = (
@@ -713,11 +726,14 @@ def run_codex_brainstorm_review(context: OrchestrationContext):
 
 
 def run_codex_planning(context: OrchestrationContext):
-    """Stage 3: Codex 계획 생성"""
-    # agent_prompts.py의 템플릿 사용
+    """Stage 3: Planning (configurable tool)"""
+    config = get_config()
+    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.PLANNER)
+
     tooling_context = _detect_tooling(Path.cwd())
     if DEBUG:
         console.print(f"[dim]Tooling context: {tooling_context}[/dim]")
+        console.print(f"[dim]Using tool: {config.tool_config.planner.value}[/dim]")
 
     # refined_brainstorming이 있으면 사용, 없으면 원본 사용
     brainstorming_to_use = (
@@ -733,10 +749,10 @@ def run_codex_planning(context: OrchestrationContext):
         selected_approach=context.selected_approach,
     )
     if DEBUG:
-        console.print("[dim]Codex prompt prepared[/dim]")
+        console.print("[dim]Planner prompt prepared[/dim]")
 
-    cmd = [CHATGPT_BIN, "exec", prompt]
-    output = _run_shell_command(cmd, stage="CODEX")
+    cmd = tool.build_command(prompt, debug=DEBUG)
+    output = _run_shell_command(cmd, stage="PLAN")
     if DEBUG:
         output_preview = (
             output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
@@ -768,7 +784,9 @@ def run_codex_planning(context: OrchestrationContext):
 def run_claude_executor(
     context: OrchestrationContext, task: Task, max_retries: int = 3
 ):
-    """Stage 4: Claude 실행 (Self-Healing 및 diff 수집 포함)"""
+    """Stage 4: Executor (configurable tool, Self-Healing 및 diff 수집 포함)"""
+    config = get_config()
+    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.EXECUTOR)
 
     # 파일 읽기 (수정 작업인 경우 기존 코드 필요)
     existing_code = ""
@@ -796,24 +814,14 @@ def run_claude_executor(
     for attempt in range(max_retries + 1):
         if DEBUG:
             console.print(
-                f"[dim]Claude attempt {attempt + 1}/{max_retries + 1} "
-                f"for {task.action_type.value} {task.file_path}[/dim]"
+                f"[dim]Executor attempt {attempt + 1}/{max_retries + 1} "
+                f"for {task.action_type.value} {task.file_path} "
+                f"(using {config.tool_config.executor.value})[/dim]"
             )
         # 1. 실행
-        cmd = [
-            CLAUDE_BIN,
-            current_prompt,
-            "--print",
-            "--tools",
-            "",
-            "--disable-slash-commands",
-            "--permission-mode",
-            "dontAsk",
-        ]
+        cmd = tool.build_command(current_prompt, debug=DEBUG)
         if DEBUG:
-            cmd.extend(["--output-format", "stream-json"])
-        if DEBUG:
-            console.print(f"[dim]Claude command: {cmd[0]} <prompt> --print[/dim]")
+            console.print(f"[dim]Executor command: {cmd[0]} <prompt>[/dim]")
         raw_output = _run_shell_command(
             cmd,
             stage=f"CLAUDE task {task.step_id}",
@@ -969,7 +977,11 @@ def execute_run_command(
 
 
 def run_codex_code_review(context: OrchestrationContext):
-    """Stage 5: Codex 코드 리뷰"""
+    """Stage 5: Code Review (configurable tool)"""
+    config = get_config()
+    tool = LLMToolFactory.get_tool_for_stage(
+        config.tool_config, StageRole.CODE_REVIEWER
+    )
 
     # 실행된 파일 목록 수집
     file_list = []
@@ -1042,10 +1054,13 @@ def run_codex_code_review(context: OrchestrationContext):
     )
 
     if DEBUG:
-        console.print("[dim]Codex code review prompt prepared[/dim]")
+        console.print("[dim]Code review prompt prepared[/dim]")
+        console.print(
+            f"[dim]Using tool: {config.tool_config.code_reviewer.value}[/dim]"
+        )
 
-    cmd = [CHATGPT_BIN, "exec", prompt]
-    output = _run_shell_command(cmd, stage="CODEX_CODE_REVIEW")
+    cmd = tool.build_command(prompt, debug=DEBUG)
+    output = _run_shell_command(cmd, stage="CODE_REVIEW")
 
     if DEBUG:
         output_preview = (
@@ -1176,7 +1191,9 @@ def _prompt_fix_selection(items: List[CodeReviewItem]) -> List[CodeReviewItem]:
 def run_claude_fixer(
     context: OrchestrationContext, review_item: CodeReviewItem, max_retries: int = 2
 ):
-    """Stage 6: Claude가 리뷰 피드백 기반으로 코드 수정"""
+    """Stage 6: Fixer (configurable tool, 리뷰 피드백 기반으로 코드 수정)"""
+    config = get_config()
+    tool = LLMToolFactory.get_tool_for_stage(config.tool_config, StageRole.FIXER)
 
     # 현재 파일 내용 읽기
     target_path = context.workspace_path / review_item.file_path
@@ -1211,26 +1228,16 @@ def run_claude_fixer(
     for attempt in range(max_retries + 1):
         if DEBUG:
             console.print(
-                f"[dim]Claude fix attempt {attempt + 1}/{max_retries + 1} "
-                f"for review item {review_item.item_id}[/dim]"
+                f"[dim]Fixer attempt {attempt + 1}/{max_retries + 1} "
+                f"for review item {review_item.item_id} "
+                f"(using {config.tool_config.fixer.value})[/dim]"
             )
 
-        cmd = [
-            CLAUDE_BIN,
-            current_prompt,
-            "--print",
-            "--tools",
-            "",
-            "--disable-slash-commands",
-            "--permission-mode",
-            "dontAsk",
-        ]
-        if DEBUG:
-            cmd.extend(["--output-format", "stream-json"])
+        cmd = tool.build_command(current_prompt, debug=DEBUG)
 
         raw_output = _run_shell_command(
             cmd,
-            stage=f"CLAUDE fix item {review_item.item_id}",
+            stage=f"FIX item {review_item.item_id}",
             parse_stream_json=DEBUG,
         )
 
@@ -1322,6 +1329,27 @@ def main(
     project_name: Optional[str] = typer.Option(
         None, "--project-name", help="프로젝트 이름 (생략 시 goal에서 자동 생성)"
     ),
+    brainstormer: Optional[str] = typer.Option(
+        None, "--brainstormer", help="Stage 1 브레인스토밍 도구 (gemini/codex/claude)"
+    ),
+    reviewer: Optional[str] = typer.Option(
+        None, "--reviewer", help="Stage 2 브레인스토밍 리뷰 도구 (gemini/codex/claude)"
+    ),
+    planner: Optional[str] = typer.Option(
+        None, "--planner", help="Stage 3 계획 수립 도구 (gemini/codex/claude)"
+    ),
+    executor: Optional[str] = typer.Option(
+        None, "--executor", help="Stage 4 코드 실행 도구 (gemini/codex/claude)"
+    ),
+    code_reviewer: Optional[str] = typer.Option(
+        None, "--code-reviewer", help="Stage 5 코드 리뷰 도구 (gemini/codex/claude)"
+    ),
+    fixer: Optional[str] = typer.Option(
+        None, "--fixer", help="Stage 6 코드 수정 도구 (gemini/codex/claude)"
+    ),
+    tool_config_file: Optional[Path] = typer.Option(
+        None, "--tool-config", help="LLM 도구 설정 파일 경로 (JSON)"
+    ),
 ):
     """
     AI Orchestration Tool (6-Stage):
@@ -1367,6 +1395,30 @@ def main(
         log_directory=Path("execution_logs"),
     )
 
+    # Load LLM tool configuration
+    tool_cfg = load_tool_config(
+        config_file=tool_config_file,
+        brainstormer=brainstormer,
+        reviewer=reviewer,
+        planner=planner,
+        executor=executor,
+        code_reviewer=code_reviewer,
+        fixer=fixer,
+    )
+
+    # Validate and warn about missing tools
+    tool_warnings = validate_tool_config(tool_cfg)
+    for warning in tool_warnings:
+        console.print(f"[yellow]Warning: {warning}[/yellow]")
+
+    if DEBUG:
+        console.print(
+            f"[dim]Tool config: brainstormer={tool_cfg.brainstormer.value}, "
+            f"reviewer={tool_cfg.reviewer.value}, planner={tool_cfg.planner.value}, "
+            f"executor={tool_cfg.executor.value}, code_reviewer={tool_cfg.code_reviewer.value}, "
+            f"fixer={tool_cfg.fixer.value}[/dim]"
+        )
+
     # Initialize configuration object
     config = OrchestratorConfig(
         auto_approve=auto_approve,
@@ -1375,6 +1427,7 @@ def main(
         debug_log_path=DEBUG_LOG_PATH,
         workspace_path=project_workspace,
         command_executor=command_executor,
+        tool_config=tool_cfg,
     )
     set_config(config)
 

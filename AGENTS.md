@@ -10,6 +10,8 @@
 - `uv run python orchestrator_cli.py "<goal>" --project-name <name>` - 프로젝트명 지정
 - `uv run python orchestrator_cli.py "<goal>" --auto-select --auto-run --auto-approve --auto-fix` - 완전 자동화
 - `uv run python orchestrator_cli.py "<goal>" --skip-review` - 코드 리뷰 생략
+- `uv run python orchestrator_cli.py "<goal>" --planner claude --reviewer claude --code-reviewer claude` - Codex 없이 Claude로 실행
+- `uv run python orchestrator_cli.py "<goal>" --tool-config ./my_tools.json` - 설정 파일 사용
 - `uv run pytest -v` - 테스트 실행
 - `uv sync` - 의존성 설치
 
@@ -25,6 +27,13 @@
 | `--skip-review` | 코드 리뷰 단계 생략 | False |
 | `--max-fix-iterations` | 리뷰-수정 반복 횟수 | 1 |
 | `--debug` | 디버그 로그 출력 | False |
+| `--brainstormer` | Stage 1 도구 (gemini/codex/claude) | gemini |
+| `--reviewer` | Stage 2 도구 (gemini/codex/claude) | codex |
+| `--planner` | Stage 3 도구 (gemini/codex/claude) | codex |
+| `--executor` | Stage 4 도구 (gemini/codex/claude) | claude |
+| `--code-reviewer` | Stage 5 도구 (gemini/codex/claude) | codex |
+| `--fixer` | Stage 6 도구 (gemini/codex/claude) | claude |
+| `--tool-config` | LLM 도구 설정 JSON 파일 | None |
 
 ## Coding Style & Naming Conventions
 - Use 4-space indentation, PEP 8 naming (`snake_case` for functions/vars, `PascalCase` for classes).
@@ -157,3 +166,46 @@ uv run pytest -v
 ```bash
 rm -rf *_debug_logs/ workspace/
 ```
+
+## Claude Code Skills
+
+### Recommended Skills
+| Skill | Use Case |
+|-------|----------|
+| `/commit` | Git 커밋 생성 (conventional commit 형식) |
+| `/test` | 테스트 실행 및 결과 분석 |
+| `/review` | 코드 리뷰 수행 |
+| `/format` | ruff format으로 코드 포맷팅 |
+| `/fix-imports` | import 정리 및 수정 |
+| `/docs` | 문서 업데이트 |
+
+### Useful Skill Combinations
+```bash
+# 코드 변경 후 전체 검증
+/format → /test → /review → /commit
+
+# 새 기능 추가 시
+/implement → /test → /format → /commit
+
+# 문서 업데이트
+/docs → /commit
+```
+
+## Development Checklist
+
+### Before Commit
+- [ ] `uv run ruff check .` - 린트 검사 통과
+- [ ] `uv run ruff format --check .` - 포맷팅 검사 통과
+- [ ] `uv run pytest -v` - 테스트 통과
+- [ ] CLI 동작 확인: `uv run python orchestrator_cli.py "<prompt>"`
+
+### Code Changes
+- [ ] PEP 8 naming 준수 (`snake_case` / `PascalCase`)
+- [ ] 공개 함수에 type hints 추가
+- [ ] `workspace/` 경로 하드코딩 금지
+- [ ] `tests/` 에 관련 테스트 추가/수정
+
+### PR Submission
+- [ ] conventional commit 형식 사용
+- [ ] Co-Authored-By 헤더 포함
+- [ ] 변경 사항 설명 작성

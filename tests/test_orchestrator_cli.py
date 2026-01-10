@@ -134,3 +134,54 @@ def test_cli_project_name_option_help():
     result = runner.invoke(app, ["--help"])
     clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     assert "--project-name" in clean_output
+
+
+def test_main_has_tool_options():
+    """Verify LLM tool options are defined in main function."""
+    import inspect
+
+    from orchestrator_cli import main
+
+    sig = inspect.signature(main)
+    tool_params = [
+        "brainstormer",
+        "reviewer",
+        "planner",
+        "executor",
+        "code_reviewer",
+        "fixer",
+        "tool_config_file",
+    ]
+    for param in tool_params:
+        assert param in sig.parameters, f"Missing parameter: {param}"
+
+
+def test_cli_tool_options_help():
+    """Verify LLM tool options appear in CLI help."""
+    import re
+
+    from typer.testing import CliRunner
+
+    from orchestrator_cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--help"])
+    clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+
+    assert "--brainstormer" in clean_output
+    assert "--reviewer" in clean_output
+    assert "--planner" in clean_output
+    assert "--executor" in clean_output
+    assert "--code-reviewer" in clean_output
+    assert "--fixer" in clean_output
+    assert "--tool-config" in clean_output
+
+
+def test_orchestrator_config_has_tool_config():
+    """Verify OrchestratorConfig has tool_config field."""
+    from llm_tools import LLMToolConfig
+    from orchestrator_cli import OrchestratorConfig
+
+    config = OrchestratorConfig()
+    assert hasattr(config, "tool_config")
+    assert isinstance(config.tool_config, LLMToolConfig)
