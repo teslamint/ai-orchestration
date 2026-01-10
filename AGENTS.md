@@ -76,3 +76,54 @@ uv run python orchestrator_cli.py "<goal>" --project-name test --skip-review --a
 - The CLI expects external tools on PATH: `gemini`, `codex`, and `claude`.
 - Default workspace is `./workspace`; each project gets isolated subdirectory.
 - Generated files stay inside `workspace/<project_name>/` unless explicitly requested.
+
+## CI/CD & GitHub Configuration
+
+### GitHub Actions
+- Workflow: `.github/workflows/orchestrator-tests.yml`
+- Triggers: `push`, `pull_request`
+- Uses `astral-sh/setup-uv@v5` for uv installation
+- Python version from `.python-version` file
+
+### GitHub Templates
+- Issue templates: `.github/ISSUE_TEMPLATE/`
+  - `bug_report.yml`: 버그 신고
+  - `feature_request.yml`: 기능 제안
+  - `config.yml`: 템플릿 설정
+- PR template: `.github/pull_request_template.md`
+
+## Bug Fix Patterns
+
+### Planner Example Contamination (341db36)
+- **Issue**: Codex planner copied example file names (`requirements.txt`, `main.py`) literally
+- **Root Cause**: Prompt example used concrete file names
+- **Fix**: Changed to placeholders (`<path/to/target_file>`) + warning text
+
+### Approach Selection Parsing (257a279)
+- **Issue**: Template placeholders and duplicates in approach list
+- **Fix**: Filter invalid entries before display
+
+### ANSI Code in Tests (b363c3e)
+- **Issue**: Rich formatting breaks string assertions in CI
+- **Fix**: Strip ANSI codes with `re.sub(r'\x1b\[[0-9;]*m', '', output)`
+
+## Development Workflow
+
+### Debug & Test Orchestrator
+```bash
+# 디버그 로그와 함께 실행
+uv run python orchestrator_cli.py "<goal>" --debug --debug-log ./logs/
+
+# 빠른 테스트 (리뷰 생략, 자동 선택)
+uv run python orchestrator_cli.py "<goal>" --skip-review --auto-select
+```
+
+### CI Test Locally
+```bash
+uv run pytest -v
+```
+
+### Cleanup Artifacts
+```bash
+rm -rf *_debug_logs/ workspace/
+```
