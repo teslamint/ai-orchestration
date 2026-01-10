@@ -12,7 +12,7 @@ wheels/
 # Runtime directories
 logs/
 workspace/
-orchestrator_debug_logs/
+*_debug_logs/
 execution_logs/
 
 # IDE
