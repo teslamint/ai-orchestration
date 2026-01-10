@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from orchestrator_cli import _extract_code_content, _extract_json_list, _generate_diff
+from orchestrator_cli import _extract_code_content, _extract_json_list, _generate_diff, _generate_project_name
 
 
 def test_extract_json_list_from_embedded_text():
@@ -77,3 +77,42 @@ def test_cli_auto_select_option_help():
     result = runner.invoke(app, ["--help"])
     assert "--auto-select" in result.output
     assert "접근 방식 자동 선택" in result.output
+
+
+def test_generate_project_name_from_goal():
+    """Test project name generation from goal text."""
+    assert _generate_project_name("Create a simple calculator") == "create_a_simple_calculator"
+    assert _generate_project_name("Build REST API!!!") == "build_rest_api"
+    assert _generate_project_name("Hello World") == "hello_world"
+
+
+def test_generate_project_name_non_english():
+    """Test project name falls back to 'project' for non-English text."""
+    assert _generate_project_name("한글 테스트") == "project"
+
+
+def test_generate_project_name_length_limit():
+    """Test project name is truncated to max length."""
+    long_goal = "A" * 50
+    result = _generate_project_name(long_goal)
+    assert len(result) <= 30
+    assert result == "a" * 30
+
+
+def test_main_has_project_name_option():
+    """Verify --project-name option is defined in main function."""
+    import inspect
+    from orchestrator_cli import main
+
+    sig = inspect.signature(main)
+    assert "project_name" in sig.parameters
+
+
+def test_cli_project_name_option_help():
+    """Verify --project-name appears in CLI help."""
+    from typer.testing import CliRunner
+    from orchestrator_cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--help"])
+    assert "--project-name" in result.output

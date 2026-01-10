@@ -50,6 +50,16 @@ def _generate_command_slug(command: str, max_length: int = 30) -> str:
     return slug if slug else "cmd"
 
 
+def _generate_project_name(goal: str, max_length: int = 30) -> str:
+    """goal 문자열에서 프로젝트명 slug를 생성합니다 (ASCII만 허용)."""
+    slug = re.sub(r'[^a-z0-9\s-]', '', goal.lower())
+    slug = re.sub(r'[\s_-]+', '_', slug)
+    slug = slug.strip('_')
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip('_')
+    return slug if slug else "project"
+
+
 @dataclass
 class CommandExecutionLog:
     """Structured log entry for a single command execution attempt."""
@@ -1247,14 +1257,27 @@ def main(
     auto_select: bool = typer.Option(
         False, "--auto-select", help="접근 방식 자동 선택 (기본값 또는 추천)"
     ),
+    project_name: Optional[str] = typer.Option(
+        None, "--project-name", help="프로젝트 이름 (생략 시 goal에서 자동 생성)"
+    ),
 ):
     """
     AI Orchestration Tool (6-Stage):
     Gemini -> Codex Review -> Codex Plan -> Claude Exec -> Codex Review -> Claude Fix
     """
+    # 프로젝트명 결정
+    if project_name is None:
+        project_name = _generate_project_name(request)
+
+    # 프로젝트별 workspace 경로
+    project_workspace = Path(workspace) / project_name
+
     console.print(
         Panel.fit(
-            f"[bold blue]Goal:[/bold blue] {request}", title="🚀 Orchestrator Started"
+            f"[bold blue]Goal:[/bold blue] {request}\n"
+            f"[bold green]Project:[/bold green] {project_name}\n"
+            f"[bold yellow]Workspace:[/bold yellow] {project_workspace}",
+            title="🚀 Orchestrator Started"
         )
     )
 
@@ -1286,7 +1309,7 @@ def main(
         auto_run=auto_run,
         debug=debug,
         debug_log_path=DEBUG_LOG_PATH,
-        workspace_path=Path(workspace),
+        workspace_path=project_workspace,
         command_executor=command_executor,
     )
     set_config(config)
@@ -1297,7 +1320,7 @@ def main(
 
     # 1. 초기 Context 생성
     context = OrchestrationContext(
-        project_name="AI_Project", user_goal=request, workspace_path=Path(workspace)
+        project_name=project_name, user_goal=request, workspace_path=project_workspace
     )
 
     # ===== Stage 1: Gemini (Brainstorming) =====
