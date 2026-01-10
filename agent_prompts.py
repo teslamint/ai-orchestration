@@ -149,29 +149,25 @@ This plan will be executed by another AI agent, so the instructions for each ste
 ]
 ```
 
-**Example of a valid output:**
+**Example of a valid output (DO NOT copy this example literally - you MUST generate steps specific to the user's actual goal):**
 ```json
 [
   {{
     "step_id": 1,
-    "file_path": "requirements.txt",
+    "file_path": "<path/to/target_file>",
     "action_type": "create_file",
-    "instruction": "Create a requirements.txt file and add the following libraries, each on a new line: requests, beautifulsoup4, pandas."
+    "instruction": "<specific instruction for creating this file based on user's goal>"
   }},
   {{
     "step_id": 2,
-    "file_path": "main.py",
-    "action_type": "create_file",
-    "instruction": "Create a new Python file named main.py. Write the basic structure to import requests and BeautifulSoup, define a target URL, and include a main execution block (`if __name__ == '__main__':`)."
-  }},
-  {{
-    "step_id": 3,
-    "file_path": ".",
-    "action_type": "run_command",
-    "instruction": "pip install -r requirements.txt"
+    "file_path": "<path/to/another_file>",
+    "action_type": "edit_file",
+    "instruction": "<specific instruction for editing this file>"
   }}
 ]
 ```
+
+**CRITICAL:** The example above shows only the JSON structure. You MUST generate steps that are specific to the user's actual goal and selected approach. Do NOT generate generic file operations like "requirements.txt" or "main.py" unless the user's goal explicitly requires them.
 
 Now, generate the JSON `implementation_plan` for the given user goal and selected approach.
 """
