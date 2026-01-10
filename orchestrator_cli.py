@@ -1,16 +1,15 @@
 import ast
 import difflib
 import json
-import os
 import re
+import selectors
+import shlex
 import shutil
 import subprocess
-import shlex
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-import selectors
-import time
 from typing import Any, Dict, List, Optional
 
 import typer
@@ -42,27 +41,28 @@ DEBUG_LOG_PATH: Path | None = None
 
 def _generate_command_slug(command: str, max_length: int = 30) -> str:
     """Generate a short slug from command for use in log filenames."""
-    slug = re.sub(r'[^\w\s-]', '', command.lower())
-    slug = re.sub(r'[\s_-]+', '_', slug)
-    slug = slug.strip('_')
+    slug = re.sub(r"[^\w\s-]", "", command.lower())
+    slug = re.sub(r"[\s_-]+", "_", slug)
+    slug = slug.strip("_")
     if len(slug) > max_length:
-        slug = slug[:max_length].rstrip('_')
+        slug = slug[:max_length].rstrip("_")
     return slug if slug else "cmd"
 
 
 def _generate_project_name(goal: str, max_length: int = 30) -> str:
     """goal 문자열에서 프로젝트명 slug를 생성합니다 (ASCII만 허용)."""
-    slug = re.sub(r'[^a-z0-9\s-]', '', goal.lower())
-    slug = re.sub(r'[\s_-]+', '_', slug)
-    slug = slug.strip('_')
+    slug = re.sub(r"[^a-z0-9\s-]", "", goal.lower())
+    slug = re.sub(r"[\s_-]+", "_", slug)
+    slug = slug.strip("_")
     if len(slug) > max_length:
-        slug = slug[:max_length].rstrip('_')
+        slug = slug[:max_length].rstrip("_")
     return slug if slug else "project"
 
 
 @dataclass
 class CommandExecutionLog:
     """Structured log entry for a single command execution attempt."""
+
     timestamp: str
     command: str
     cwd: Optional[str]
@@ -76,6 +76,7 @@ class CommandExecutionLog:
 @dataclass
 class CommandExecutionSummary:
     """Summary of all attempts for a single command execution."""
+
     command_id: str
     command: str
     cwd: Optional[str]
@@ -119,26 +120,27 @@ def _print_failure_summary(
 @dataclass
 class CommandExecutor:
     """Executor for shell commands with auto-approve, retry, and structured logging."""
+
     auto_approve: bool = False
     retries: int = 1
     log_directory: Path = field(default_factory=lambda: Path("execution_logs"))
     _execution_counter: int = field(default=0, init=False)
-    
+
     def __post_init__(self):
         self.log_directory = Path(self.log_directory)
         self.log_directory.mkdir(parents=True, exist_ok=True)
-    
+
     def _generate_command_id(self, command: str) -> str:
         """Generate a unique command ID with timestamp, counter, and slug."""
         self._execution_counter += 1
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = _generate_command_slug(command)
         return f"{timestamp}_{self._execution_counter:04d}_{slug}"
-    
+
     def _write_execution_log(self, summary: CommandExecutionSummary) -> Path:
         """Write a complete execution log (all attempts + final status) to a JSON file."""
         log_file = self.log_directory / f"{summary.command_id}.json"
-        
+
         log_data = {
             "command_id": summary.command_id,
             "command": summary.command,
@@ -150,16 +152,18 @@ class CommandExecutor:
             "final_exit_code": summary.final_exit_code,
             "attempts": summary.attempts,
         }
-        
+
         with open(log_file, "w", encoding="utf-8") as f:
             json.dump(log_data, f, indent=2, ensure_ascii=False)
-        
+
         return log_file
-    
-    def run(self, command: str, cwd: Optional[str] = None) -> tuple[bool, str, List[CommandExecutionLog]]:
+
+    def run(
+        self, command: str, cwd: Optional[str] = None
+    ) -> tuple[bool, str, List[CommandExecutionLog]]:
         """
         Execute a command with optional confirmation, retries, and structured logging.
-        
+
         Returns:
             tuple of (success: bool, output: str, logs: List[CommandExecutionLog])
         """
@@ -167,9 +171,11 @@ class CommandExecutor:
         started_at = datetime.now().isoformat()
         logs: List[CommandExecutionLog] = []
         attempts_data: List[Dict[str, Any]] = []
-        
+
         if not self.auto_approve:
-            should_run = typer.confirm(f"Do you want to execute this command: {command}?")
+            should_run = typer.confirm(
+                f"Do you want to execute this command: {command}?"
+            )
             if not should_run:
                 finished_at = datetime.now().isoformat()
                 summary = CommandExecutionSummary(
@@ -187,17 +193,17 @@ class CommandExecutor:
                 if DEBUG:
                     console.print(f"[dim]Execution log written to: {log_file}[/dim]")
                 return False, "Command execution skipped by user.", []
-        
+
         max_attempts = 1 + self.retries
         final_status = "failed"
         final_exit_code: Optional[int] = None
         final_output = ""
         last_stderr = ""
-        
+
         for attempt in range(max_attempts):
             timestamp = datetime.now().isoformat()
             start_time = time.monotonic()
-            
+
             try:
                 command_args = shlex.split(command)
                 result = subprocess.run(
@@ -207,10 +213,10 @@ class CommandExecutor:
                     encoding="utf-8",
                     cwd=cwd,
                 )
-                
+
                 end_time = time.monotonic()
                 duration_ms = int((end_time - start_time) * 1000)
-                
+
                 log_entry = CommandExecutionLog(
                     timestamp=timestamp,
                     command=command,
@@ -222,7 +228,7 @@ class CommandExecutor:
                     attempt=attempt + 1,
                 )
                 logs.append(log_entry)
-                
+
                 attempt_data = {
                     "timestamp": log_entry.timestamp,
                     "attempt": log_entry.attempt,
@@ -232,26 +238,28 @@ class CommandExecutor:
                     "duration_ms": log_entry.duration_ms,
                 }
                 attempts_data.append(attempt_data)
-                
+
                 last_stderr = result.stderr
-                
+
                 if result.returncode == 0:
                     final_status = "success"
                     final_exit_code = result.returncode
                     final_output = result.stdout.strip()
                     break
-                
+
                 final_exit_code = result.returncode
                 final_output = f"Command failed with exit code {result.returncode}: {result.stderr}"
-                
+
                 if attempt < max_attempts - 1:
-                    console.print(f"[yellow]Command failed (attempt {attempt + 1}/{max_attempts}), retrying...[/yellow]")
+                    console.print(
+                        f"[yellow]Command failed (attempt {attempt + 1}/{max_attempts}), retrying...[/yellow]"
+                    )
                     continue
-                
+
             except Exception as e:
                 end_time = time.monotonic()
                 duration_ms = int((end_time - start_time) * 1000)
-                
+
                 log_entry = CommandExecutionLog(
                     timestamp=timestamp,
                     command=command,
@@ -263,7 +271,7 @@ class CommandExecutor:
                     attempt=attempt + 1,
                 )
                 logs.append(log_entry)
-                
+
                 attempt_data = {
                     "timestamp": log_entry.timestamp,
                     "attempt": log_entry.attempt,
@@ -273,17 +281,19 @@ class CommandExecutor:
                     "duration_ms": log_entry.duration_ms,
                 }
                 attempts_data.append(attempt_data)
-                
+
                 last_stderr = str(e)
                 final_exit_code = -1
                 final_output = f"Command execution error: {e}"
-                
+
                 if attempt < max_attempts - 1:
-                    console.print(f"[yellow]Command failed (attempt {attempt + 1}/{max_attempts}), retrying...[/yellow]")
+                    console.print(
+                        f"[yellow]Command failed (attempt {attempt + 1}/{max_attempts}), retrying...[/yellow]"
+                    )
                     continue
-        
+
         finished_at = datetime.now().isoformat()
-        
+
         summary = CommandExecutionSummary(
             command_id=command_id,
             command=command,
@@ -296,10 +306,10 @@ class CommandExecutor:
             attempts=attempts_data,
         )
         log_file = self._write_execution_log(summary)
-        
+
         if DEBUG:
             console.print(f"[dim]Execution log written to: {log_file}[/dim]")
-        
+
         if final_status == "failed":
             _print_failure_summary(
                 command=command,
@@ -307,13 +317,14 @@ class CommandExecutor:
                 final_exit_code=final_exit_code,
                 last_stderr=last_stderr,
             )
-        
+
         return final_status == "success", final_output, logs
 
 
 @dataclass
 class OrchestratorConfig:
     """Configuration object for orchestrator settings."""
+
     auto_approve: bool = False
     auto_run: bool = False
     debug: bool = False
@@ -445,7 +456,12 @@ def _run_shell_command(
         else:
             # encoding='utf-8'로 한글 처리 보장
             result = subprocess.run(
-                args, capture_output=True, text=True, check=True, encoding="utf-8", cwd=cwd
+                args,
+                capture_output=True,
+                text=True,
+                check=True,
+                encoding="utf-8",
+                cwd=cwd,
             )
             return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -567,6 +583,7 @@ def _extract_code_content(text: str) -> str:
         return text[start_index:end_index].strip()
     return text[start_index:].strip()
 
+
 def _detect_tooling(repo_root: Path) -> str:
     pyproject_path = repo_root / "pyproject.toml"
     poetry_lock = repo_root / "poetry.lock"
@@ -608,7 +625,7 @@ def _generate_diff(old_content: str, new_content: str, file_path: str) -> str:
         new_lines,
         fromfile=f"a/{file_path}",
         tofile=f"b/{file_path}",
-        lineterm=""
+        lineterm="",
     )
     return "".join(diff)
 
@@ -635,7 +652,9 @@ def run_gemini_brainstorm(context: OrchestrationContext):
 
     output = _run_shell_command(cmd, stage="GEMINI")
     if DEBUG:
-        output_preview = output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        output_preview = (
+            output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        )
         console.print(
             Panel(
                 output_preview,
@@ -668,7 +687,9 @@ def run_codex_brainstorm_review(context: OrchestrationContext):
     output = _run_shell_command(cmd, stage="CODEX_REVIEW")
 
     if DEBUG:
-        output_preview = output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        output_preview = (
+            output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        )
         console.print(
             Panel(
                 output_preview,
@@ -685,7 +706,7 @@ def run_codex_brainstorm_review(context: OrchestrationContext):
     recommended_match = re.search(
         r"##\s*Recommended\s+Approach\s*\n+(.*?)(?:\n##|\Z)",
         output,
-        re.DOTALL | re.IGNORECASE
+        re.DOTALL | re.IGNORECASE,
     )
     if recommended_match:
         context.brainstorming_review_notes = recommended_match.group(1).strip()
@@ -717,7 +738,9 @@ def run_codex_planning(context: OrchestrationContext):
     cmd = [CHATGPT_BIN, "exec", prompt]
     output = _run_shell_command(cmd, stage="CODEX")
     if DEBUG:
-        output_preview = output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        output_preview = (
+            output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        )
         console.print(
             Panel(
                 output_preview,
@@ -797,7 +820,11 @@ def run_claude_executor(
             parse_stream_json=DEBUG,
         )
         if DEBUG:
-            output_preview = raw_output if len(raw_output) <= 2000 else f"{raw_output[:2000]}...\n[truncated]"
+            output_preview = (
+                raw_output
+                if len(raw_output) <= 2000
+                else f"{raw_output[:2000]}...\n[truncated]"
+            )
             console.print(
                 Panel(
                     output_preview,
@@ -810,7 +837,7 @@ def run_claude_executor(
                 raw_output,
             )
         code_content = _extract_code_content(raw_output)
-        if code_content.lstrip().startswith("{") and "\"type\"" in code_content:
+        if code_content.lstrip().startswith("{") and '"type"' in code_content:
             if DEBUG:
                 console.print(
                     "[yellow]Claude output appears to be stream JSON; skipping file write.[/yellow]"
@@ -902,19 +929,19 @@ def execute_run_command(
     console.print(f"[bold yellow]Command to run:[/bold yellow] {task.instruction}")
     if DEBUG:
         console.print(f"[dim]RUN_COMMAND task id: {task.step_id}[/dim]")
-    
+
     executor = get_command_executor()
     current_config = get_config()
     command_text = _normalize_run_command(task.instruction)
-    
+
     if current_config.auto_run and not executor.auto_approve:
         executor.auto_approve = True
-    
+
     success, output, exec_logs = executor.run(
         command_text,
         cwd=str(context.workspace_path),
     )
-    
+
     if success:
         context.execution_logs.append(
             ExecutionLog(
@@ -924,7 +951,7 @@ def execute_run_command(
                 output=output,
             )
         )
-        console.print(f"[green]✔ Command executed successfully.[/green]")
+        console.print("[green]✔ Command executed successfully.[/green]")
         console.print(f"[dim]{output}[/dim]")
     else:
         context.execution_logs.append(
@@ -952,14 +979,19 @@ def run_codex_code_review(context: OrchestrationContext):
             # Task에서 파일 경로 찾기
             for task in context.implementation_plan:
                 if task.step_id == log.step_id:
-                    if task.action_type in [ActionType.CREATE_FILE, ActionType.EDIT_FILE]:
+                    if task.action_type in [
+                        ActionType.CREATE_FILE,
+                        ActionType.EDIT_FILE,
+                    ]:
                         file_path = str(task.file_path)
                         file_list.append(file_path)
                         # 파일 내용 읽기
                         full_path = context.workspace_path / task.file_path
                         if full_path.exists():
                             try:
-                                file_contents[file_path] = full_path.read_text(encoding="utf-8")
+                                file_contents[file_path] = full_path.read_text(
+                                    encoding="utf-8"
+                                )
                             except Exception:
                                 file_contents[file_path] = "[Error reading file]"
 
@@ -969,22 +1001,36 @@ def run_codex_code_review(context: OrchestrationContext):
     execution_summary = f"Total tasks: {len(context.execution_logs)}, Success: {success_count}, Failed: {fail_count}"
 
     # 계획 요약 생성
-    plan_summary = "\n".join([
-        f"- Step {t.step_id}: {t.action_type.value} {t.file_path}"
-        for t in context.implementation_plan
-    ])
+    plan_summary = "\n".join(
+        [
+            f"- Step {t.step_id}: {t.action_type.value} {t.file_path}"
+            for t in context.implementation_plan
+        ]
+    )
 
     # Diff 문자열 생성
-    code_diffs = "\n\n".join([
-        f"=== {path} ===\n{diff}"
-        for path, diff in context.generated_diffs.items()
-    ]) if context.generated_diffs else "(No diffs available)"
+    code_diffs = (
+        "\n\n".join(
+            [
+                f"=== {path} ===\n{diff}"
+                for path, diff in context.generated_diffs.items()
+            ]
+        )
+        if context.generated_diffs
+        else "(No diffs available)"
+    )
 
     # 파일 내용 문자열 생성
-    file_contents_str = "\n\n".join([
-        f"=== {path} ===\n```\n{content}\n```"
-        for path, content in file_contents.items()
-    ]) if file_contents else "(No files)"
+    file_contents_str = (
+        "\n\n".join(
+            [
+                f"=== {path} ===\n```\n{content}\n```"
+                for path, content in file_contents.items()
+            ]
+        )
+        if file_contents
+        else "(No files)"
+    )
 
     prompt = AGENT_PROMPTS["code_reviewer"]["user"].format(
         user_goal=context.user_goal,
@@ -1002,7 +1048,9 @@ def run_codex_code_review(context: OrchestrationContext):
     output = _run_shell_command(cmd, stage="CODEX_CODE_REVIEW")
 
     if DEBUG:
-        output_preview = output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        output_preview = (
+            output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        )
         console.print(
             Panel(
                 output_preview,
@@ -1015,7 +1063,7 @@ def run_codex_code_review(context: OrchestrationContext):
     # JSON 파싱
     try:
         # JSON 추출 시도
-        json_match = re.search(r'\{[\s\S]*\}', output)
+        json_match = re.search(r"\{[\s\S]*\}", output)
         if json_match:
             review_data = json.loads(json_match.group())
 
@@ -1023,24 +1071,30 @@ def run_codex_code_review(context: OrchestrationContext):
             items = []
             for item_data in review_data.get("items", []):
                 try:
-                    items.append(CodeReviewItem(
-                        item_id=item_data["item_id"],
-                        file_path=Path(item_data["file_path"]),
-                        line_start=item_data.get("line_start"),
-                        line_end=item_data.get("line_end"),
-                        review_type=ReviewItemType(item_data["review_type"]),
-                        severity=ReviewSeverity(item_data["severity"]),
-                        description=item_data["description"],
-                        suggestion=item_data["suggestion"],
-                        code_snippet=item_data.get("code_snippet"),
-                    ))
+                    items.append(
+                        CodeReviewItem(
+                            item_id=item_data["item_id"],
+                            file_path=Path(item_data["file_path"]),
+                            line_start=item_data.get("line_start"),
+                            line_end=item_data.get("line_end"),
+                            review_type=ReviewItemType(item_data["review_type"]),
+                            severity=ReviewSeverity(item_data["severity"]),
+                            description=item_data["description"],
+                            suggestion=item_data["suggestion"],
+                            code_snippet=item_data.get("code_snippet"),
+                        )
+                    )
                 except Exception as e:
                     if DEBUG:
-                        console.print(f"[yellow]Review item parsing failed: {e}[/yellow]")
+                        console.print(
+                            f"[yellow]Review item parsing failed: {e}[/yellow]"
+                        )
 
             context.code_review_result = CodeReviewResult(
                 reviewed_at=review_data.get("reviewed_at", datetime.now().isoformat()),
-                total_files_reviewed=review_data.get("total_files_reviewed", len(file_list)),
+                total_files_reviewed=review_data.get(
+                    "total_files_reviewed", len(file_list)
+                ),
                 items=items,
                 overall_assessment=review_data.get("overall_assessment", ""),
                 requires_fixes=review_data.get("requires_fixes", len(items) > 0),
@@ -1085,7 +1139,9 @@ def _prompt_fix_selection(items: List[CodeReviewItem]) -> List[CodeReviewItem]:
             f"[{color}]{item.severity.value.upper()}[/{color}]",
             item.review_type.value,
             str(item.file_path),
-            item.description[:60] + "..." if len(item.description) > 60 else item.description,
+            item.description[:60] + "..."
+            if len(item.description) > 60
+            else item.description,
         )
 
     console.print(table)
@@ -1102,7 +1158,11 @@ def _prompt_fix_selection(items: List[CodeReviewItem]) -> List[CodeReviewItem]:
     elif choice.lower() == "n":
         return []
     elif choice.lower() == "c":
-        return [item for item in items if item.severity in [ReviewSeverity.CRITICAL, ReviewSeverity.HIGH]]
+        return [
+            item
+            for item in items
+            if item.severity in [ReviewSeverity.CRITICAL, ReviewSeverity.HIGH]
+        ]
     else:
         # 쉼표로 구분된 숫자 파싱
         try:
@@ -1113,7 +1173,9 @@ def _prompt_fix_selection(items: List[CodeReviewItem]) -> List[CodeReviewItem]:
             return []
 
 
-def run_claude_fixer(context: OrchestrationContext, review_item: CodeReviewItem, max_retries: int = 2):
+def run_claude_fixer(
+    context: OrchestrationContext, review_item: CodeReviewItem, max_retries: int = 2
+):
     """Stage 6: Claude가 리뷰 피드백 기반으로 코드 수정"""
 
     # 현재 파일 내용 읽기
@@ -1157,9 +1219,11 @@ def run_claude_fixer(context: OrchestrationContext, review_item: CodeReviewItem,
             CLAUDE_BIN,
             current_prompt,
             "--print",
-            "--tools", "",
+            "--tools",
+            "",
             "--disable-slash-commands",
-            "--permission-mode", "dontAsk",
+            "--permission-mode",
+            "dontAsk",
         ]
         if DEBUG:
             cmd.extend(["--output-format", "stream-json"])
@@ -1219,7 +1283,7 @@ def run_claude_fixer(context: OrchestrationContext, review_item: CodeReviewItem,
         ExecutionLog(
             step_id=review_item.item_id,
             success=False,
-            message=f"Fix failed for review item {review_item.item_id}"
+            message=f"Fix failed for review item {review_item.item_id}",
         )
     )
 
@@ -1231,9 +1295,7 @@ def run_claude_fixer(context: OrchestrationContext, review_item: CodeReviewItem,
 def main(
     request: str = typer.Argument(..., help="프로젝트 요구사항"),
     workspace: str = typer.Option("./workspace", help="작업 파일이 생성될 폴더 경로"),
-    debug: bool = typer.Option(
-        False, "--debug", help="상세 진행 로그 출력"
-    ),
+    debug: bool = typer.Option(False, "--debug", help="상세 진행 로그 출력"),
     debug_log: str = typer.Option(
         "./orchestrator_debug_logs",
         "--debug-log",
@@ -1277,7 +1339,7 @@ def main(
             f"[bold blue]Goal:[/bold blue] {request}\n"
             f"[bold green]Project:[/bold green] {project_name}\n"
             f"[bold yellow]Workspace:[/bold yellow] {project_workspace}",
-            title="🚀 Orchestrator Started"
+            title="🚀 Orchestrator Started",
         )
     )
 
@@ -1291,7 +1353,9 @@ def main(
                 f"{log_path.stem}-{timestamp}{log_path.suffix}"
             ).resolve()
         else:
-            DEBUG_LOG_PATH = (log_path / f"orchestrator_debug-{timestamp}.log").resolve()
+            DEBUG_LOG_PATH = (
+                log_path / f"orchestrator_debug-{timestamp}.log"
+            ).resolve()
         if DEBUG:
             console.print(f"[dim]Debug log file: {DEBUG_LOG_PATH}[/dim]")
     else:
@@ -1348,19 +1412,27 @@ def main(
         TextColumn("[progress.description]{task.description}"),
         transient=True,
     ) as progress:
-        progress.add_task(description="[yellow]Codex reviewing brainstorming...[/yellow]", total=None)
+        progress.add_task(
+            description="[yellow]Codex reviewing brainstorming...[/yellow]", total=None
+        )
         run_codex_brainstorm_review(context)
 
     console.print(
         Panel(
-            str(context.refined_brainstorming) if context.refined_brainstorming else "(No refined output)",
+            str(context.refined_brainstorming)
+            if context.refined_brainstorming
+            else "(No refined output)",
             title="Stage 2: Refined Brainstorming",
             border_style="yellow",
         )
     )
 
     # 사용자에게 접근 방식 선택 요청 (refined_brainstorming 기반)
-    ideas_to_use = context.refined_brainstorming if context.refined_brainstorming else context.brainstorming_ideas
+    ideas_to_use = (
+        context.refined_brainstorming
+        if context.refined_brainstorming
+        else context.brainstorming_ideas
+    )
     option_pattern = re.compile(
         r"^###?\s*(approach|option|plan|접근\s*방식)\s*\d*:?\s*\S", re.IGNORECASE
     )
@@ -1379,9 +1451,13 @@ def main(
             title_match = title_extract_pattern.match(line)
             if title_match:
                 title_part = title_match.group(1)
-                title_without_placeholder = placeholder_pattern.sub("", title_part).strip()
+                title_without_placeholder = placeholder_pattern.sub(
+                    "", title_part
+                ).strip()
                 # 플레이스홀더 제거 후 실제 내용이 없으면 제외
-                if not title_without_placeholder or not re.search(r"[가-힣a-zA-Z]", title_without_placeholder):
+                if not title_without_placeholder or not re.search(
+                    r"[가-힣a-zA-Z]", title_without_placeholder
+                ):
                     continue
             # 중복 제거
             if line not in seen:
@@ -1394,8 +1470,12 @@ def main(
                 title_match = title_extract_pattern.match(line)
                 if title_match:
                     title_part = title_match.group(1)
-                    title_without_placeholder = placeholder_pattern.sub("", title_part).strip()
-                    if not title_without_placeholder or not re.search(r"[가-힣a-zA-Z]", title_without_placeholder):
+                    title_without_placeholder = placeholder_pattern.sub(
+                        "", title_part
+                    ).strip()
+                    if not title_without_placeholder or not re.search(
+                        r"[가-힣a-zA-Z]", title_without_placeholder
+                    ):
                         continue
                 seen.add(line)
                 options.append(line)
@@ -1440,10 +1520,14 @@ def main(
         custom_approach = typer.prompt("Enter your custom approach")
         context.selected_approach = custom_approach
     else:
-        console.print("[yellow]Invalid selection. Using the first approach as default.[/yellow]")
+        console.print(
+            "[yellow]Invalid selection. Using the first approach as default.[/yellow]"
+        )
         context.selected_approach = options[0] if options else ideas_to_use
 
-    console.print(f"[bold green]Selected Approach:[/bold green] {context.selected_approach}")
+    console.print(
+        f"[bold green]Selected Approach:[/bold green] {context.selected_approach}"
+    )
 
     # ===== Stage 3: Codex (Planning) =====
     console.print("\n[bold green]Stage 3: Codex Planning[/bold green]")
@@ -1497,7 +1581,11 @@ def main(
             progress.advance(task_id)
 
     console.print(
-        Panel.fit("[bold]Stage 4 Complete[/bold]", title="Implementation Done", border_style="magenta")
+        Panel.fit(
+            "[bold]Stage 4 Complete[/bold]",
+            title="Implementation Done",
+            border_style="magenta",
+        )
     )
 
     # ===== Stage 5-6: Code Review and Fixes =====
@@ -1508,13 +1596,17 @@ def main(
             context.fix_iteration_count = fix_iteration
 
             # ===== Stage 5: Codex (Code Review) =====
-            console.print(f"\n[bold red]Stage 5: Codex Code Review (iteration {fix_iteration}/{max_fix_iterations})[/bold red]")
+            console.print(
+                f"\n[bold red]Stage 5: Codex Code Review (iteration {fix_iteration}/{max_fix_iterations})[/bold red]"
+            )
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 transient=True,
             ) as progress:
-                progress.add_task(description="[red]Codex reviewing code...[/red]", total=None)
+                progress.add_task(
+                    description="[red]Codex reviewing code...[/red]", total=None
+                )
                 run_codex_code_review(context)
 
             if context.code_review_result:
@@ -1522,7 +1614,13 @@ def main(
 Files Reviewed: {context.code_review_result.total_files_reviewed}
 Issues Found: {len(context.code_review_result.items)}
 Requires Fixes: {context.code_review_result.requires_fixes}"""
-                console.print(Panel(review_summary, title="Stage 5: Code Review Summary", border_style="red"))
+                console.print(
+                    Panel(
+                        review_summary,
+                        title="Stage 5: Code Review Summary",
+                        border_style="red",
+                    )
+                )
 
                 if context.code_review_result.items:
                     for item in context.code_review_result.items:
@@ -1539,21 +1637,28 @@ Requires Fixes: {context.code_review_result.requires_fixes}"""
                         )
 
                 # ===== Stage 6: Claude (Fixes) =====
-                if context.code_review_result.requires_fixes and context.code_review_result.items:
-                    console.print(f"\n[bold blue]Stage 6: Claude Fixes (iteration {fix_iteration}/{max_fix_iterations})[/bold blue]")
+                if (
+                    context.code_review_result.requires_fixes
+                    and context.code_review_result.items
+                ):
+                    console.print(
+                        f"\n[bold blue]Stage 6: Claude Fixes (iteration {fix_iteration}/{max_fix_iterations})[/bold blue]"
+                    )
 
                     # 수정할 항목 선택
                     if auto_fix:
                         items_to_fix = context.code_review_result.items
                     else:
-                        items_to_fix = _prompt_fix_selection(context.code_review_result.items)
+                        items_to_fix = _prompt_fix_selection(
+                            context.code_review_result.items
+                        )
 
                     if items_to_fix:
                         # 심각도 순으로 정렬 (critical > high > medium > low > info)
                         severity_order = ["critical", "high", "medium", "low", "info"]
                         sorted_items = sorted(
                             items_to_fix,
-                            key=lambda x: severity_order.index(x.severity.value)
+                            key=lambda x: severity_order.index(x.severity.value),
                         )
 
                         with Progress(
@@ -1564,13 +1669,13 @@ Requires Fixes: {context.code_review_result.requires_fixes}"""
                             fix_count = len(sorted_items)
                             fix_task_id = progress.add_task(
                                 description="[blue]Claude fixing...[/blue]",
-                                total=fix_count
+                                total=fix_count,
                             )
 
                             for review_item in sorted_items:
                                 progress.update(
                                     fix_task_id,
-                                    description=f"Fixing {review_item.file_path} ({review_item.review_type.value})..."
+                                    description=f"Fixing {review_item.file_path} ({review_item.review_type.value})...",
                                 )
                                 run_claude_fixer(context, review_item)
                                 progress.advance(fix_task_id)
@@ -1579,7 +1684,7 @@ Requires Fixes: {context.code_review_result.requires_fixes}"""
                             Panel.fit(
                                 f"[bold]Stage 6 Complete - {len(sorted_items)} fixes applied[/bold]",
                                 title="Fixes Applied",
-                                border_style="blue"
+                                border_style="blue",
                             )
                         )
 
@@ -1599,7 +1704,9 @@ Requires Fixes: {context.code_review_result.requires_fixes}"""
         console.print("[dim]Code review skipped (--skip-review)[/dim]")
 
     console.print(
-        Panel.fit("[bold green]All Done![/bold green]", title="6-Stage Workflow Finished")
+        Panel.fit(
+            "[bold green]All Done![/bold green]", title="6-Stage Workflow Finished"
+        )
     )
 
 
