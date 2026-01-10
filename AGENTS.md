@@ -30,7 +30,37 @@
 - Use 4-space indentation, PEP 8 naming (`snake_case` for functions/vars, `PascalCase` for classes).
 - Prefer explicit type hints on public functions and models.
 - Keep prompts in `agent_prompts.py` as plain strings; avoid side effects in that module.
-- No formatter/linter is configured; keep diffs tidy and imports sorted.
+- Code is formatted and linted with ruff (see Linting section below).
+
+## Linting & Formatting
+- **Linter/Formatter**: ruff
+- **Config**: `pyproject.toml` `[tool.ruff]` section
+- **Rules**: `E` (errors), `F` (pyflakes), `I` (isort)
+- **Ignored**: `E501` (line too long), `E722` (bare except), `E402` in tests
+
+### Commands
+```bash
+# Check for issues
+uv run ruff check .
+
+# Auto-fix issues
+uv run ruff check . --fix
+
+# Format code
+uv run ruff format .
+
+# Check formatting without changes
+uv run ruff format --check .
+```
+
+### Pre-commit Hooks
+```bash
+# Install hooks (one-time)
+uv run pre-commit install
+
+# Run on all files
+uv run pre-commit run --all-files
+```
 
 ## Testing Guidelines
 - Tests under `tests/` with `test_*.py` naming
