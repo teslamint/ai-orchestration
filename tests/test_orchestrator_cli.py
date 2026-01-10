@@ -70,13 +70,15 @@ def test_main_has_auto_select_option():
 
 def test_cli_auto_select_option_help():
     """Verify --auto-select appears in CLI help."""
+    import re
     from typer.testing import CliRunner
     from orchestrator_cli import app
 
     runner = CliRunner()
     result = runner.invoke(app, ["--help"])
-    assert "--auto-select" in result.output
-    assert "접근 방식 자동 선택" in result.output
+    clean_output = re.sub(r'\x1b\[[0-9;]*m', '', result.output)
+    assert "--auto-select" in clean_output
+    assert "접근 방식 자동 선택" in clean_output
 
 
 def test_generate_project_name_from_goal():
@@ -110,9 +112,11 @@ def test_main_has_project_name_option():
 
 def test_cli_project_name_option_help():
     """Verify --project-name appears in CLI help."""
+    import re
     from typer.testing import CliRunner
     from orchestrator_cli import app
 
     runner = CliRunner()
     result = runner.invoke(app, ["--help"])
-    assert "--project-name" in result.output
+    clean_output = re.sub(r'\x1b\[[0-9;]*m', '', result.output)
+    assert "--project-name" in clean_output
