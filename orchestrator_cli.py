@@ -1362,15 +1362,48 @@ def main(
     # 사용자에게 접근 방식 선택 요청 (refined_brainstorming 기반)
     ideas_to_use = context.refined_brainstorming if context.refined_brainstorming else context.brainstorming_ideas
     option_pattern = re.compile(
-        r"^###?\s*(approach|option|plan|접근\s*방식)\b", re.IGNORECASE
+        r"^###?\s*(approach|option|plan|접근\s*방식)\s*\d*:?\s*\S", re.IGNORECASE
     )
+    # 접근 방식 제목에서 실제 이름 추출용 패턴
+    title_extract_pattern = re.compile(
+        r"^###?\s*(?:approach|option|plan|접근\s*방식)\s*\d*:?\s*(.*)$", re.IGNORECASE
+    )
+    # 템플릿 플레이스홀더 패턴 (예: [Name], [...])
+    placeholder_pattern = re.compile(r"\[.*?\]")
     lines = [line.strip() for line in ideas_to_use.split("\n")]
-    options = [line for line in lines if option_pattern.match(line)]
+    options = []
+    seen = set()
+    for line in lines:
+        if option_pattern.match(line):
+            # 접근 방식 제목에서 이름 부분만 추출하여 플레이스홀더 검사
+            title_match = title_extract_pattern.match(line)
+            if title_match:
+                title_part = title_match.group(1)
+                title_without_placeholder = placeholder_pattern.sub("", title_part).strip()
+                # 플레이스홀더 제거 후 실제 내용이 없으면 제외
+                if not title_without_placeholder or not re.search(r"[가-힣a-zA-Z]", title_without_placeholder):
+                    continue
+            # 중복 제거
+            if line not in seen:
+                seen.add(line)
+                options.append(line)
     if not options:
-        # 대안: "### Approach" 패턴 시도
-        options = [line for line in lines if line.startswith("### ")]
+        # 대안: "### Approach" 패턴 시도 (실제 내용이 있는 것만)
+        for line in lines:
+            if line.startswith("### ") and line not in seen:
+                title_match = title_extract_pattern.match(line)
+                if title_match:
+                    title_part = title_match.group(1)
+                    title_without_placeholder = placeholder_pattern.sub("", title_part).strip()
+                    if not title_without_placeholder or not re.search(r"[가-힣a-zA-Z]", title_without_placeholder):
+                        continue
+                seen.add(line)
+                options.append(line)
     if not options:
-        options = [line for line in lines if line.startswith("- **")]
+        for line in lines:
+            if line.startswith("- **") and line not in seen:
+                seen.add(line)
+                options.append(line)
     if DEBUG:
         console.print(f"[dim]Approach options detected: {len(options)}[/dim]")
 
