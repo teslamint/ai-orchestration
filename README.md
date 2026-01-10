@@ -1,5 +1,7 @@
 # AI Orchestration
 
+[![Orchestration Tests](https://github.com/teslamint/ai-orchestration/actions/workflows/orchestrator-tests.yml/badge.svg)](https://github.com/teslamint/ai-orchestration/actions/workflows/orchestrator-tests.yml)
+
 Gemini → Codex → Claude 6단계 워크플로우로, 사용자의 목표를 브레인스토밍부터 코드 리뷰/수정까지 자동화하는 로컬 CLI 오케스트레이터입니다.
 
 ## 주요 특징
