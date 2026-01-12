@@ -16,6 +16,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `openai_api` - OpenAI API (GPT-4o)
   - `anthropic_api` - Anthropic API (Claude Sonnet 4)
   - Streaming output with Rich Live display
+- Configurable LLM provider support
+  - `--brainstormer`, `--reviewer`, `--planner`, `--executor`, `--code-reviewer`, `--fixer` CLI options
+  - `--tool-config` option for JSON configuration file
+- Ralph Wiggum feedback loop for automated iterative review/fix cycles
+  - `--enable-ralph-wiggum` to activate the feedback loop
+  - `--ralph-wiggum-threshold` for acceptance threshold (0.0-1.0)
+  - `--ralph-wiggum-max-iterations` for maximum review attempts
+  - `--completion-promise` for task completion signal
+  - Self-reference context for tracking iteration history
 - Optional API dependencies in `pyproject.toml` (`uv sync --extra api`)
 - Ruff linter and formatter configuration
 - Pre-commit hooks for automated code quality checks

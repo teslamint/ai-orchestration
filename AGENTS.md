@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Root scripts: `orchestrator_cli.py` (Typer CLI), `orchestration_context.py` (Pydantic models), and `agent_prompts.py` (LLM prompt templates).
+- Root scripts: `orchestrator_cli.py` (Typer CLI), `orchestration_context.py` (Pydantic models), `agent_prompts.py` (LLM prompt templates), `llm_tools.py` (LLM tool abstractions), and `api_tools.py` (API-based LLM tools).
 - `workspace/<project_name>/` holds generated projects in isolated directories.
 - `pyproject.toml` defines runtime dependencies and Python version (3.9+).
 
@@ -34,6 +34,11 @@
 | `--code-reviewer` | Stage 5 도구 | codex |
 | `--fixer` | Stage 6 도구 | claude |
 | `--tool-config` | LLM 도구 설정 JSON 파일 | None |
+| `--enable-ralph-wiggum` | Ralph Wiggum 피드백 루프 활성화 | False |
+| `--ralph-wiggum-threshold` | 승인 임계값 (0.0-1.0) | 0.8 |
+| `--ralph-wiggum-max-iterations` | 최대 반복 횟수 | 3 |
+| `--completion-promise` | 완료 시 출력할 promise 텍스트 | None |
+| `--ralph-wiggum-state-file/--no-ralph-wiggum-state-file` | 상태 파일 사용 여부 | True |
 
 ### Available Tool Types
 | Type | Description |
@@ -103,6 +108,20 @@ uv run python orchestrator_cli.py "<goal>" --project-name test --auto-select --a
 
 # 리뷰 제외 빠른 테스트
 uv run python orchestrator_cli.py "<goal>" --project-name test --skip-review --auto-select
+```
+
+### Ralph Wiggum Feedback Loop
+자동 반복 리뷰/수정 사이클을 활성화합니다:
+```bash
+# 기본 피드백 루프
+uv run python orchestrator_cli.py "<goal>" --enable-ralph-wiggum
+
+# 높은 임계값과 더 많은 반복
+uv run python orchestrator_cli.py "<goal>" \
+  --enable-ralph-wiggum \
+  --ralph-wiggum-threshold 0.9 \
+  --ralph-wiggum-max-iterations 5 \
+  --completion-promise "DONE"
 ```
 
 ## Known Issues & Solutions
