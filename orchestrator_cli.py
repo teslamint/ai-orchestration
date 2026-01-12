@@ -34,7 +34,10 @@ from orchestration_context import (
     CodeReviewItem,
     CodeReviewResult,
     ExecutionLog,
+    IterationMetadata,
     OrchestrationContext,
+    RalphWiggumFeedback,
+    ReviewDecision,
     ReviewItemType,
     ReviewSeverity,
     Task,
@@ -1219,6 +1222,174 @@ def run_codex_code_review(context: OrchestrationContext):
         )
 
 
+def run_ralph_wiggum_reviewer(context: OrchestrationContext) -> None:
+    """Ralph Wiggum 피드백 루프 리뷰어를 실행합니다."""
+    config = get_config()
+    tool_type = config.tool_config.get_tool_for_stage(StageRole.CODE_REVIEWER)
+
+    # 실행된 파일 목록 수집
+    file_list = []
+    file_contents = {}
+    for log in context.execution_logs:
+        if log.success:
+            for task in context.implementation_plan:
+                if task.step_id == log.step_id:
+                    if task.action_type in [
+                        ActionType.CREATE_FILE,
+                        ActionType.EDIT_FILE,
+                    ]:
+                        file_path = str(task.file_path)
+                        file_list.append(file_path)
+                        full_path = context.workspace_path / task.file_path
+                        if full_path.exists():
+                            try:
+                                file_contents[file_path] = full_path.read_text(
+                                    encoding="utf-8"
+                                )
+                            except Exception:
+                                file_contents[file_path] = "[Error reading file]"
+
+    # 파일 내용 문자열 생성
+    file_contents_str = (
+        "\n\n".join(
+            [
+                f"=== {path} ===\n```\n{content}\n```"
+                for path, content in file_contents.items()
+            ]
+        )
+        if file_contents
+        else "(No files)"
+    )
+
+    # 자체 참조 컨텍스트 생성
+    self_reference_context = context.get_self_reference_context()
+    if not self_reference_context:
+        self_reference_context = "(No previous iterations)"
+
+    # completion promise 설정 (없으면 기본값)
+    completion_promise = context.ralph_wiggum_completion_promise or "DONE"
+
+    # 원본 프롬프트 사용 (프롬프트 불변성)
+    original_goal = context.ralph_wiggum_original_prompt or context.user_goal
+
+    prompt = AGENT_PROMPTS["ralph_wiggum_reviewer"]["user"].format(
+        user_goal=original_goal,
+        self_reference_context=self_reference_context,
+        worker_output=file_contents_str,
+        file_list="\n".join([f"- {f}" for f in file_list]),
+        completion_promise=completion_promise,
+    )
+
+    if DEBUG:
+        console.print("[dim]Ralph Wiggum Reviewer prompt prepared[/dim]")
+        console.print(f"[dim]Using tool: {tool_type.value}[/dim]")
+
+    # API vs CLI tool branching
+    if LLMToolFactory.is_api_tool(tool_type):
+        tool = LLMToolFactory.create_api_tool(tool_type)
+        system_prompt = AGENT_PROMPTS["ralph_wiggum_reviewer"].get("system", "")
+        output = _run_api_tool(
+            tool, prompt, stage="RALPH_WIGGUM", system_prompt=system_prompt
+        )
+    else:
+        tool = LLMToolFactory.get_tool_for_stage(
+            config.tool_config, StageRole.CODE_REVIEWER
+        )
+        cmd = tool.build_command(prompt, debug=DEBUG)
+        output = _run_shell_command(cmd, stage="RALPH_WIGGUM")
+
+    if DEBUG:
+        output_preview = (
+            output if len(output) <= 2000 else f"{output[:2000]}...\n[truncated]"
+        )
+        console.print(
+            Panel(
+                output_preview,
+                title="Ralph Wiggum Review (preview)",
+                border_style="cyan",
+            )
+        )
+        _write_debug_log("Ralph Wiggum Review output", output)
+
+    # JSON 파싱
+    try:
+        json_match = re.search(r"\{[\s\S]*\}", output)
+        if json_match:
+            review_data = json.loads(json_match.group())
+
+            feedback = RalphWiggumFeedback(
+                reviewer_id="ralph_wiggum",
+                decision=ReviewDecision(review_data.get("decision", "pending")),
+                comments=review_data.get("comments", []),
+                suggestions=review_data.get("suggestions", []),
+                confidence_score=float(review_data.get("confidence_score", 0.0)),
+                reviewed_at=datetime.now().isoformat(),
+            )
+            context.submit_ralph_wiggum_feedback(feedback)
+    except (json.JSONDecodeError, ValueError) as e:
+        console.print(f"[red]Ralph Wiggum review JSON parsing failed: {e}[/red]")
+        # 기본 피드백 생성
+        feedback = RalphWiggumFeedback(
+            reviewer_id="ralph_wiggum",
+            decision=ReviewDecision.NEEDS_REVISION,
+            comments=["Review parsing failed"],
+            suggestions=[],
+            confidence_score=0.0,
+            reviewed_at=datetime.now().isoformat(),
+        )
+        context.submit_ralph_wiggum_feedback(feedback)
+
+
+def _write_ralph_state_file(context: OrchestrationContext) -> None:
+    """Ralph Wiggum 상태 파일을 작성합니다."""
+    state_dir = context.workspace_path / ".claude"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "ralph-loop.local.md"
+
+    content = f"""---
+active: true
+iteration: {context.ralph_wiggum_iteration.review_attempt}
+max_iterations: {context.ralph_wiggum_iteration.max_attempts}
+completion_promise: "{context.ralph_wiggum_completion_promise or "null"}"
+started_at: "{datetime.now().isoformat()}"
+---
+
+{context.ralph_wiggum_original_prompt or context.user_goal}
+"""
+    state_file.write_text(content, encoding="utf-8")
+    context.ralph_wiggum_state_file = state_file
+
+
+def _cleanup_ralph_state_file(context: OrchestrationContext) -> None:
+    """Ralph Wiggum 상태 파일을 삭제합니다."""
+    if context.ralph_wiggum_state_file and context.ralph_wiggum_state_file.exists():
+        context.ralph_wiggum_state_file.unlink()
+
+
+def _capture_workspace_files(context: OrchestrationContext) -> Dict[str, str]:
+    """워크스페이스 파일들의 상태를 캡처합니다."""
+    file_snapshot = {}
+    for log in context.execution_logs:
+        if log.success:
+            for task in context.implementation_plan:
+                if task.step_id == log.step_id:
+                    if task.action_type in [
+                        ActionType.CREATE_FILE,
+                        ActionType.EDIT_FILE,
+                    ]:
+                        full_path = context.workspace_path / task.file_path
+                        if full_path.exists():
+                            try:
+                                file_snapshot[str(task.file_path)] = (
+                                    full_path.read_text(encoding="utf-8")
+                                )
+                            except Exception:
+                                file_snapshot[str(task.file_path)] = (
+                                    "[Error reading file]"
+                                )
+    return file_snapshot
+
+
 def _prompt_fix_selection(items: List[CodeReviewItem]) -> List[CodeReviewItem]:
     """사용자에게 수정할 리뷰 항목을 선택하도록 요청"""
     if not items:
@@ -1457,6 +1628,25 @@ def main(
     tool_config_file: Optional[Path] = typer.Option(
         None, "--tool-config", help="LLM 도구 설정 파일 경로 (JSON)"
     ),
+    enable_ralph_wiggum: bool = typer.Option(
+        False, "--enable-ralph-wiggum", help="Ralph Wiggum 피드백 루프 활성화"
+    ),
+    ralph_wiggum_threshold: float = typer.Option(
+        0.8, "--ralph-wiggum-threshold", help="Ralph Wiggum 승인 임계값 (0.0-1.0)"
+    ),
+    ralph_wiggum_max_iterations: int = typer.Option(
+        3, "--ralph-wiggum-max-iterations", help="Ralph Wiggum 최대 반복 횟수"
+    ),
+    ralph_wiggum_completion_promise: Optional[str] = typer.Option(
+        None,
+        "--completion-promise",
+        help="완료 시 출력할 promise 텍스트 (예: 'DONE')",
+    ),
+    ralph_wiggum_state_file: bool = typer.Option(
+        True,
+        "--ralph-wiggum-state-file/--no-ralph-wiggum-state-file",
+        help="자체 참조용 상태 파일 사용 여부",
+    ),
 ):
     """
     AI Orchestration Tool (6-Stage):
@@ -1544,7 +1734,16 @@ def main(
 
     # 1. 초기 Context 생성
     context = OrchestrationContext(
-        project_name=project_name, user_goal=request, workspace_path=project_workspace
+        project_name=project_name,
+        user_goal=request,
+        workspace_path=project_workspace,
+        ralph_wiggum_enabled=enable_ralph_wiggum,
+        ralph_wiggum_threshold=ralph_wiggum_threshold,
+        ralph_wiggum_iteration=IterationMetadata(
+            max_attempts=ralph_wiggum_max_iterations
+        ),
+        ralph_wiggum_original_prompt=request if enable_ralph_wiggum else None,
+        ralph_wiggum_completion_promise=ralph_wiggum_completion_promise,
     )
 
     # ===== Stage 1: Gemini (Brainstorming) =====
@@ -1862,6 +2061,168 @@ Requires Fixes: {context.code_review_result.requires_fixes}"""
                 break
     else:
         console.print("[dim]Code review skipped (--skip-review)[/dim]")
+
+    # ===== Ralph Wiggum Feedback Loop (Hybrid) =====
+    if context.ralph_wiggum_enabled:
+        console.print(
+            "\n[bold cyan]===== Ralph Wiggum Feedback Loop (Hybrid) =====[/bold cyan]"
+        )
+        console.print(
+            f"[dim]Threshold: {context.ralph_wiggum_threshold}, "
+            f"Max iterations: {context.ralph_wiggum_iteration.max_attempts}[/dim]"
+        )
+        if context.ralph_wiggum_completion_promise:
+            console.print(
+                f"[dim]Completion Promise: <promise>{context.ralph_wiggum_completion_promise}</promise>[/dim]"
+            )
+
+        # 상태 파일 생성 (자체 참조용)
+        if ralph_wiggum_state_file:
+            _write_ralph_state_file(context)
+            console.print(
+                f"[dim]State file created: {context.ralph_wiggum_state_file}[/dim]"
+            )
+
+        while True:
+            current_attempt = context.ralph_wiggum_iteration.review_attempt
+            max_attempts = context.ralph_wiggum_iteration.max_attempts
+
+            console.print(
+                f"\n[bold cyan]Ralph Wiggum Review "
+                f"(iteration {current_attempt}/{max_attempts})[/bold cyan]"
+            )
+
+            # 파일 상태 스냅샷 저장 (자체 참조 강화)
+            file_snapshot = _capture_workspace_files(context)
+            context.save_iteration_snapshot(file_snapshot)
+            if DEBUG:
+                console.print(
+                    f"[dim]Captured {len(file_snapshot)} files for self-reference[/dim]"
+                )
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=True,
+            ) as progress:
+                progress.add_task(
+                    description="[cyan]Ralph Wiggum reviewing...[/cyan]", total=None
+                )
+                run_ralph_wiggum_reviewer(context)
+
+            if context.ralph_wiggum_feedback:
+                feedback = context.ralph_wiggum_feedback
+                decision = feedback.decision
+                if hasattr(decision, "value"):
+                    decision_str = decision.value
+                else:
+                    decision_str = str(decision)
+
+                review_summary = f"""Decision: {decision_str.upper()}
+Confidence Score: {feedback.confidence_score:.2f}
+Threshold: {context.ralph_wiggum_threshold}
+Comments: {len(feedback.comments)}
+Suggestions: {len(feedback.suggestions)}"""
+
+                console.print(
+                    Panel(
+                        review_summary,
+                        title=f"Ralph Wiggum Review (Attempt {current_attempt})",
+                        border_style="cyan",
+                    )
+                )
+
+                if feedback.comments:
+                    console.print("[bold]Comments:[/bold]")
+                    for comment in feedback.comments:
+                        console.print(f"  - {comment}")
+
+                if feedback.suggestions:
+                    console.print("[bold]Suggestions:[/bold]")
+                    for suggestion in feedback.suggestions:
+                        console.print(f"  - {suggestion}")
+
+                # Promise 태그 확인 (하이브리드: 자체 참조 + Reviewer)
+                if context.ralph_wiggum_completion_promise:
+                    last_output = " ".join(feedback.comments)
+                    if context.check_promise_completion(last_output):
+                        console.print(
+                            f"[bold green]Promise detected: "
+                            f"<promise>{context.ralph_wiggum_completion_promise}</promise>[/bold green]"
+                        )
+                        break
+
+                # 승인 확인
+                if context.is_ralph_wiggum_accepted():
+                    console.print(
+                        "[bold green]Ralph Wiggum APPROVED![/bold green] "
+                        f"(score: {feedback.confidence_score:.2f} >= {context.ralph_wiggum_threshold})"
+                    )
+                    break
+
+                # 추가 시도 가능 여부 확인
+                if not context.can_ralph_wiggum_retry():
+                    console.print(
+                        f"[bold yellow]Max iterations ({max_attempts}) reached. "
+                        "Stopping Ralph Wiggum loop.[/bold yellow]"
+                    )
+                    break
+
+                # 이전 출력 저장 (자체 참조용)
+                output_summary = (
+                    f"Decision: {decision_str}, Score: {feedback.confidence_score:.2f}"
+                )
+                if feedback.comments:
+                    output_summary += f", Comments: {feedback.comments[:2]}"
+                context.add_previous_output(output_summary)
+
+                # 다음 시도 준비
+                console.print(
+                    f"[yellow]Ralph Wiggum needs revision. "
+                    f"Preparing iteration {current_attempt + 1}...[/yellow]"
+                )
+                context.prepare_ralph_wiggum_retry()
+
+                # 상태 파일 업데이트
+                if ralph_wiggum_state_file:
+                    _write_ralph_state_file(context)
+
+                # 피드백 기반 수정 시도
+                if feedback.suggestions:
+                    console.print(
+                        "[dim]Applying suggestions from Ralph Wiggum...[/dim]"
+                    )
+                    # 기존 코드 리뷰 루프를 재실행하여 제안 사항 반영
+                    if not skip_review and context.code_review_result:
+                        run_codex_code_review(context)
+                        if (
+                            context.code_review_result
+                            and context.code_review_result.requires_fixes
+                            and context.code_review_result.items
+                        ):
+                            for review_item in context.code_review_result.items[:3]:
+                                run_claude_fixer(context, review_item)
+            else:
+                console.print(
+                    "[yellow]Ralph Wiggum review did not produce results.[/yellow]"
+                )
+                break
+
+        # 상태 파일 정리
+        if ralph_wiggum_state_file:
+            _cleanup_ralph_state_file(context)
+            console.print("[dim]State file cleaned up[/dim]")
+
+        console.print(
+            Panel.fit(
+                "[bold]Ralph Wiggum Feedback Loop Complete[/bold]",
+                title="Feedback Loop Done",
+                border_style="cyan",
+            )
+        )
+    else:
+        if DEBUG:
+            console.print("[dim]Ralph Wiggum feedback loop disabled[/dim]")
 
     console.print(
         Panel.fit(
