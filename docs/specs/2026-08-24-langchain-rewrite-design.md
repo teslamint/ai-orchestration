@@ -2,7 +2,7 @@
 schema: design/v1
 title: LangChain-based Multi-model Agent Orchestration Rewrite
 type: feat
-status: draft
+status: approved
 date: 2026-08-24
 ---
 
