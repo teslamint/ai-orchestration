@@ -1,6 +1,6 @@
 ---
 title: Multi-model Agent Orchestration Rewrite
-status: draft
+status: approved
 date: 2026-08-24
 schema: spec/v1
 supersedes: docs/specs/2026-08-24-langchain-rewrite-design.md
