@@ -13,10 +13,11 @@ _Created 2026-08-24._
 ## Overview
 
 Rewrite `ai-orchestration` from a 2611-line monolithic CLI into a package with an explicit
-stage engine, provider abstraction, and an embedded compound-loop contract layer. Models are
-reached primarily through the existing CLIProxyAPI OpenAI-compatible endpoint (110 models),
-which enforces output schemas on some models but not all (A7), with the current CLI-subprocess
-path retained as an automatic fallback. No agent framework is adopted.
+stage engine and provider abstraction. Models are reached primarily through the existing
+CLIProxyAPI OpenAI-compatible endpoint (110 models), which enforces output schemas on some
+models but not all (A7), with the current CLI-subprocess path retained as an automatic
+fallback. No agent framework is adopted. compound-loop embedding is deliberately deferred to a
+follow-up cycle — see §Scope/Out and §Deferred.
 
 This supersedes `docs/specs/2026-08-24-langchain-rewrite-design.md`, which was approved on
 evidence later found to be wrong. That spec is preserved unchanged as the record of what was
@@ -58,7 +59,7 @@ runs review→fix over a text file, stopping when the promise appears or iterati
 ## Scope
 
 ### In
-- `src/ai_orchestration/` package; stage engine; provider layer; compound-loop bridge.
+- `src/ai_orchestration/` package; stage engine; provider layer.
 - CLIProxyAPI HTTP provider requesting `response_format` where supported, with extraction
   fallback and validation on every path.
 - Automatic fallback to CLI-subprocess providers.
@@ -70,6 +71,10 @@ runs review→fix over a text file, stopping when the promise appears or iterati
 - Autonomous tool-calling loops; the pipeline stays a fixed 6-stage sequence.
 - Changing prompt wording; prompts move verbatim.
 - Publishing to PyPI; remote CI changes beyond the Python floor bump.
+- **compound-loop embedding** — deferred whole, by decision, to the follow-up cycle described
+  in §Deferred. No `compound_loop/` package, no partial stub, and no empty directory ships in
+  this cycle; a scaffold with no scenario and no success criterion would read as delivered
+  work while enforcing nothing.
 
 ## Assumptions and Preconditions
 
@@ -107,10 +112,6 @@ src/ai_orchestration/
 │   └── routing.py          # per-stage resolution + proxy→CLI fallback
 ├── models/                 # pydantic models (ported verbatim)
 ├── prompts/                # prompt templates (moved verbatim)
-├── compound_loop/
-│   ├── progress.py         # .release-loop/progress.md reader/writer
-│   ├── plan_validator.py   # plan/v1 frontmatter + body_seal validation
-│   └── release_loop.py     # ReleaseLoopBridge
 └── utils/                  # slug, extract, diff helpers
 ```
 
@@ -145,10 +146,12 @@ src/ai_orchestration/
    `chat.completions.parse()` is avoided in favour of `create()` with flat schemas, per
    decision 3.
 
-4. **compound-loop is a contract, not a dependency.** Per A1 nothing is installable.
-   `compound_loop/` implements the progress-schema and plan/v1 contracts in Python. The
-   framework checkout is consulted only as data at a configurable path; absence degrades
-   loudly, never silently.
+4. **No compound-loop code this cycle.** A1 established that nothing there is installable, and
+   the embedding's real target — running the pipeline as gated phases — is a larger change
+   than the rewrite it would ride along with. Shipping the bridge half-built would leave a
+   package whose contracts nothing verifies. §Deferred records the full target so it cannot be
+   lost, and the engine keeps that future in reach: `engine/gates.py` already models an
+   approval gate, which is the primitive a phase gate is built from.
 
 5. **Clean cutover.** Root modules (`orchestrator_cli.py`, `orchestration_context.py`,
    `llm_tools.py`, `api_tools.py`, `agent_prompts.py`) and the four legacy suites are deleted
@@ -218,3 +221,34 @@ extract fallback, and a stub returning neither must raise.
 - Whether the per-model structured-output capability map is a static table, a probe cached per
   endpoint, or simply always-try-then-degrade. Owner: `planning`; decision 3's fallback makes
   all three behaviourally safe, so this is a cost/complexity choice, not a correctness one.
+
+## Deferred: compound-loop embedding (follow-up cycle)
+
+Recorded here so the deferral is a decision with a target, not an omission. The user's original
+request named three goals; this is the third, and it is descoped by explicit choice rather than
+dropped. Approved scope for the follow-up cycle, in dependency order:
+
+1. **Contract I/O.** Read and write `.release-loop/progress.md` per its schema, and validate
+   `plan/v1` documents (frontmatter fields plus `body_seal`, whose canonical extraction is
+   `open(path, encoding="utf-8", newline=None).read()` then `text.split('---', 2)[2]`,
+   SHA-256).
+2. **Gated orchestration.** Run the six pipeline stages as compound-loop phases, recording each
+   transition in the ledger and enforcing the gates — built on `engine/gates.py` from this
+   cycle.
+
+Schema sources, verified 2026-08-24 (v1 cited two paths that do not exist; these are the real
+ones):
+
+| Contract | Actual path in the compound-loop checkout | Size |
+|---|---|---|
+| progress ledger | `skills/release-loop/references/progress-schema.md` | 70 lines |
+| plan/v1 | `skills/planning/schemas/plan-schema.md` | 298 lines |
+| headless behaviour | `schemas/headless-contract.md` | 23 lines |
+| executable validator | `skills/planning/scripts/validate-plan-frontmatter.py` | — |
+
+Two constraints that cycle inherits. First, A1 stands: nothing in compound-loop is pip
+installable, so the contracts are reimplemented in Python and the checkout is consulted only as
+data at a configurable path, degrading loudly when absent. Second, branch and worktree
+automation — which v1 folded into `ReleaseLoopBridge` — is **not** in the approved scope above;
+it lets the tool mutate git state on its own and needs its own design pass before it is
+considered.
