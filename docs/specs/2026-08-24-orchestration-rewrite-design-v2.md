@@ -33,10 +33,13 @@ task list rather than prose that must be regex-scraped.
 The pipeline stops before running a generated shell command and prints it. The user answers.
 With `--auto-run --auto-approve`, the same code path proceeds without prompting.
 
-### S3: Resume an interrupted run
-A run is interrupted (Ctrl-C, crash, closed laptop) after the executor stage. Re-invoking with
-the same project resumes at the next incomplete stage; completed stages are not re-run and
-their output is not regenerated.
+### S3: Re-run or resume a project
+A run is interrupted (Ctrl-C, crash, closed laptop) after the executor stage. Re-invoking the
+same project name **starts fresh by default**, because "run it again" is the established
+meaning of that command today. When incomplete state exists the tool says so and names the
+resumable stage; `--resume` continues from it, skipping completed stages and preserving their
+output. Under `--auto-*` (non-interactive) the default remains fresh, so an unattended rerun
+can never silently emit an artifact built from a stale goal.
 
 ### S4: Iterate review → fix until accepted
 The code reviewer returns a decision and a confidence score. The loop accepts when
@@ -76,8 +79,9 @@ runs review→fix over a text file, stopping when the promise appears or iterati
 | A4: the four legacy test suites keep passing via root re-export shims | `grep -n 'monkeypatch.setattr\|inspect.signature' tests/` | 2026-08-24T13:10Z | **contradiction** — `monkeypatch.setattr(orchestrator_cli, "_run_ralph_loop_review", …)` needs call-time lookup in the root namespace; a plain re-export shim breaks the seam silently | tests/test_orchestrator_cli.py:241-242 |
 | A5: an agent framework is needed for cycles, gates, resume, fan-out | 50-line stdlib engine exercised across two processes | 2026-08-24T14:02Z | **contradiction** — all four satisfied with 0 dependencies; PID 41911 paused at gate, PID 41917 resumed and completed without re-running finished stages | measured, this session |
 | A6: CLIProxyAPI serves multiple models over one OpenAI-compatible endpoint | `curl $EP/v1/models` | 2026-08-24T14:00Z | **match** — HTTP 200, 110 models (claude 16, gemini 10, gpt 10, deepseek/kimi/qwen/glm/grok/minimax) | `https://cliproxyapi.tailnet-0a4d.ts.net:8317/v1` |
-| A7: the proxy enforces JSON schema output | `curl $EP/v1/chat/completions` with `response_format.json_schema.strict=true` | 2026-08-24T14:01Z | **match** — returned schema-valid `{"tasks":[{"step_id":1,...}]}`, parsed by `json.loads` with no regex | same endpoint, model `gemini-3.1-pro-low` |
+| A7: the proxy enforces JSON schema output uniformly | `curl` with `response_format.json_schema.strict=true`, then the `openai` SDK's `chat.completions.parse()` across three models | 2026-08-24T14:01Z / 14:22Z | **partial contradiction** — enforcement is per-model, not endpoint-wide. `gpt-5.5`: both forms OK. `gemini-3.1-pro-low`: flat inline schema OK, but the SDK's `$ref`/`$defs` schema returns `{}` per item. `claude-sonnet-5`: ignores `response_format` in both forms, returns prose. Drives decision 3's mandatory extract fallback | same endpoint; openai SDK 3.3.1 |
 | A8: `httpx` is a new dependency | `grep -c 'name = "httpx"' uv.lock` | 2026-08-24T14:06Z | **match (already present)** — httpx is already in the lock as a transitive dep; net new runtime deps ≈ 0 | uv.lock |
+| A9: the official OpenAI SDK reaches non-OpenAI models through the proxy | `OpenAI(base_url=...).chat.completions.create(model="claude-sonnet-5", ...)` | 2026-08-24T14:22Z | **match** — returned `'OK'`; SDK also raises typed `APIConnectionError` on a closed port, which is the S5 fallback trigger. Transitive cost: openai 14, anthropic 15, all three vendor SDKs 40 | openai SDK 3.3.1, isolated venv |
 
 Environment invariants: Python 3.13.11 runtime, `.python-version` = 3.13, `.devcontainer/Dockerfile`
 uses `python:3.13-slim`. Base branch `master`. `CLIPROXYAPI_KEY` is present in the environment.
@@ -95,8 +99,8 @@ src/ai_orchestration/
 │   ├── gates.py            # ApprovalGate / Paused, honours --auto-* flags
 │   └── loops.py            # threshold loop: accept-or-iterate, max_iterations
 ├── providers/
-│   ├── base.py             # Provider protocol: complete(), complete_structured()
-│   ├── http.py             # CLIProxyAPI (OpenAI-compatible, response_format)
+│   ├── base.py             # Provider protocol + StructuredSupport capability
+│   ├── http.py             # CLIProxyAPI via official openai SDK
 │   ├── cli.py              # gemini/codex/claude subprocess providers
 │   └── routing.py          # per-stage resolution + proxy→CLI fallback
 ├── models/                 # pydantic models (ported verbatim)
@@ -120,9 +124,24 @@ src/ai_orchestration/
    stage to a provider and falls back on unreachability, logging the downgrade (S5). Both
    satisfy one `Provider` protocol, so stages never branch on transport.
 
-3. **Structured output replaces regex scraping.** Stages needing typed data call
-   `complete_structured(schema=...)` (A7). `utils/extract.py` helpers are retained solely for
-   the CLI-fallback path, which cannot enforce schemas.
+3. **Structured output is a probed capability, not a guarantee.** Per A7 schema enforcement
+   is per-model, not endpoint-wide: `gpt-5.5` honours it, `gemini-3.1-pro-low` honours only a
+   flattened inline schema, and `claude-sonnet-5` ignores `response_format` entirely through
+   the proxy. Therefore `complete_structured()` is defined for **every** provider as: request
+   a schema when the model is known to support one, then validate; on refusal, malformed JSON,
+   or validation failure, fall back to the `utils/extract.py` helpers and validate again;
+   raise only if both fail. The CLI providers implement the same contract with the extract
+   path alone. Schemas are emitted flat — no `$ref`/`$defs` — because the SDK's derived
+   indirection is what `gemini-3.1-pro-low` fails on.
+
+3a. **Official OpenAI SDK as the HTTP client.** The proxy speaks the OpenAI wire protocol, so
+   one SDK reaches all 110 models (verified: `claude-sonnet-5` answers through it). It
+   supplies typed failures — `APIConnectionError` is the exact S5 fallback trigger — plus
+   retry and timeout handling. The `anthropic` and `google-generativeai` SDKs are **not**
+   added: their native wire formats are what the proxy abstracts away, and all three together
+   cost 40 transitive packages against the OpenAI SDK's 14, most already in `uv.lock`.
+   `chat.completions.parse()` is avoided in favour of `create()` with flat schemas, per
+   decision 3.
 
 4. **compound-loop is a contract, not a dependency.** Per A1 nothing is installable.
    `compound_loop/` implements the progress-schema and plan/v1 contracts in Python. The
@@ -155,7 +174,9 @@ class Provider(Protocol):
 Offline by default: a `FakeProvider` implements the protocol; the HTTP provider is tested
 against a stub server; no test performs live network I/O. Every behaviour asserted by the four
 legacy suites is ported and must pass before those files are deleted. Resume is tested across
-two real subprocesses, not simulated in-process.
+two real subprocesses, not simulated in-process. Structured-output degradation is tested
+explicitly: a stub returning prose instead of JSON must still yield a validated model via the
+extract fallback, and a stub returning neither must raise.
 
 ## Risks
 
@@ -167,6 +188,8 @@ two real subprocesses, not simulated in-process.
    it already does today; behaviour is unchanged.
 4. **Endpoint config drift** → base URL and key are configurable; unreachable endpoints fail
    with an explicit diagnostic naming the resolved URL.
+5. **Per-model structured-output variance** (A7) → mitigated by decision 3's mandatory
+   extract fallback on every provider; no stage may assume schema compliance.
 
 ## Success Criteria
 
@@ -174,10 +197,10 @@ two real subprocesses, not simulated in-process.
    - **Measured by**: `uv run pytest -v`, with a reviewer confirming each ported assertion maps to a legacy one.
 2. The pipeline runs end to end through the proxy with per-stage model routing.
    - **Measured by**: `uv run ai-orchestration "create a hello world script" --planner opus-5 --skip-review` exits 0 and writes the project.
-3. An interrupted run resumes without re-running completed stages.
-   - **Measured by**: interrupt after executor, re-invoke, and confirm the log shows completed stages skipped.
-4. The proxy path enforces schemas rather than scraping prose.
-   - **Measured by**: a test asserting the planner returns a validated model without invoking `_extract_json_list`.
+3. Re-running a project is fresh by default; `--resume` continues without re-running completed stages.
+   - **Measured by**: interrupt after executor, then (a) re-invoke plainly and confirm the executor runs again against the current goal, and (b) re-invoke with `--resume` and confirm the log shows completed stages skipped.
+4. Typed data survives models that ignore schemas, without regressing to silent breakage.
+   - **Measured by**: a test where the planner runs against (a) a schema-honouring stub and (b) a prose-only stub, and returns an equally valid model in both cases; and a third stub returning unparseable output raises rather than yielding a partial plan.
 5. With the proxy unreachable, the run completes via CLI fallback.
    - **Measured by**: point the base URL at a closed port; confirm exit 0 and a logged downgrade.
 6. Lint and format are clean.
@@ -189,3 +212,6 @@ two real subprocesses, not simulated in-process.
   config file. Owner: `planning`.
 - Whether parallel fan-out is enabled for independent stages in this cycle or deferred.
   Owner: `planning`; deferring does not affect any success criterion.
+- Whether the per-model structured-output capability map is a static table, a probe cached per
+  endpoint, or simply always-try-then-degrade. Owner: `planning`; decision 3's fallback makes
+  all three behaviourally safe, so this is a cost/complexity choice, not a correctness one.
