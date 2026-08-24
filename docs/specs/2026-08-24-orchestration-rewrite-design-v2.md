@@ -161,8 +161,9 @@ src/ai_orchestration/
 ## Interface
 
 Stage roles are unchanged (6): brainstormer, reviewer, planner, executor, code_reviewer, fixer.
-Every existing CLI option is preserved; `--brainstormer`/`--planner`/etc. additionally accept
-any model id the proxy exposes, not just `gemini|codex|claude`.
+Every existing CLI option is preserved. The six per-stage flags — `--brainstormer`,
+`--reviewer`, `--planner`, `--executor`, `--code-reviewer`, `--fixer` — additionally accept any
+model id the proxy exposes, not just `gemini|codex|claude`.
 
 ```python
 class Provider(Protocol):
