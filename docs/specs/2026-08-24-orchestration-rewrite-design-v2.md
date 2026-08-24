@@ -14,9 +14,9 @@ _Created 2026-08-24._
 
 Rewrite `ai-orchestration` from a 2611-line monolithic CLI into a package with an explicit
 stage engine, provider abstraction, and an embedded compound-loop contract layer. Models are
-reached primarily through the existing CLIProxyAPI OpenAI-compatible endpoint (110 models,
-schema-enforced structured output), with the current CLI-subprocess path retained as an
-automatic fallback. No agent framework is adopted.
+reached primarily through the existing CLIProxyAPI OpenAI-compatible endpoint (110 models),
+which enforces output schemas on some models but not all (A7), with the current CLI-subprocess
+path retained as an automatic fallback. No agent framework is adopted.
 
 This supersedes `docs/specs/2026-08-24-langchain-rewrite-design.md`, which was approved on
 evidence later found to be wrong. That spec is preserved unchanged as the record of what was
@@ -26,8 +26,9 @@ originally approved; §Assumptions records each contradiction with its proving c
 
 ### S1: Run the pipeline with per-stage model routing
 A user runs `uv run ai-orchestration "build a CLI todo app" --planner opus-5 --executor claude`.
-Each stage resolves to its own model through one endpoint; the planner returns a schema-valid
-task list rather than prose that must be regex-scraped.
+Each stage resolves to its own model through one endpoint. The planner receives a validated
+task list whether the chosen model honours the requested schema or only emits prose, because
+`complete_structured()` degrades to extraction before validating (decision 3).
 
 ### S2: Approve a command before it executes
 The pipeline stops before running a generated shell command and prints it. The user answers.
@@ -58,7 +59,8 @@ runs review→fix over a text file, stopping when the promise appears or iterati
 
 ### In
 - `src/ai_orchestration/` package; stage engine; provider layer; compound-loop bridge.
-- CLIProxyAPI HTTP provider with `response_format` structured output.
+- CLIProxyAPI HTTP provider requesting `response_format` where supported, with extraction
+  fallback and validation on every path.
 - Automatic fallback to CLI-subprocess providers.
 - Durable run state enabling resume; approval gates.
 - Port of all existing test coverage to the new suite; deletion of legacy root modules.
