@@ -104,6 +104,11 @@ become a false match.
   timeout/retry handling, flat schema serialization, and response extraction.
 - Create `src/ai_orchestration/providers/cli.py`: `AgyProvider`, `CodexProvider`, and
   `ClaudeProvider`, binary discovery, per-binary argv, streaming parsing, and structured output.
+- Create `src/ai_orchestration/providers/legacy_api.py`: compatibility adapters for the committed
+  `APIResponse`, `OpenAITool`, `AnthropicTool`, and `GoogleAITool` contracts, plus the
+  `ToolType.GEMINI_API`, `ToolType.OPENAI_API`, and `ToolType.ANTHROPIC_API` factory paths. These
+  direct-vendor adapters remain available when an existing tool-config file selects them; the
+  new proxy model slots do not silently reinterpret those values.
 - Create `src/ai_orchestration/providers/routing.py`: catalog validation, slot resolution,
   primary/fallback state transitions, downgrade audit events, and terminal CLI failures.
 - Create `src/ai_orchestration/providers/__init__.py`: provider exports.
@@ -120,24 +125,19 @@ become a false match.
   command execution/audit logs, and stage-to-provider calls.
 - Create `src/ai_orchestration/engine/__init__.py`: engine exports.
 - Create `src/ai_orchestration/cli.py`: Typer commands, all existing options, config loading,
-  run/resume dispatch, and smoke-testable output.
+  run/resume dispatch, and user-facing diagnostics.
 - Modify `README.md` and `AGENTS.md`: console-script usage, `agy` replacement, model/fallback
-  configuration, workspace anchor, and verification commands.
+  configuration, legacy `*_api` compatibility tool values, workspace anchor, and verification
+  commands.
 - Delete root modules and legacy test files only in U6 after successor coverage is green.
-
-# Scenario coverage map
-
-The approved origin spec contains six User Scenarios. Each row names the ordered units and an
-integration scenario that walks the user-visible path.
-
 | Scenario | Ordered unit chain | Scenario evidence |
 |---|---|---|
-| S1 per-stage routing | U1 → U3 → U4 → U5 → U6 | Stub catalog plus six-stage run with proxy model flags and `--executor claude`; integration test `test_run_routes_each_stage` (**Covers S1, Covers AE3**) |
-| S2 command approval | U1 → U4 → U5 → U6 | Non-TTY gate test proves no command executes without `--auto-run`; paired authorized run proceeds (**Covers S2, Covers AE9**) |
-| S3 fresh rerun and resume | U1 → U4 → U5 → U6 | Two real subprocesses interrupt after executor, fresh rerun repeats executor, `--resume` skips completed stages (**Covers S3, Covers AE4**) |
-| S4 review/fix loops | U2 → U4 → U5 → U6 | Main loop and Ralph Wiggum integration fixtures exercise separate caps and acceptance rules (**Covers S4, Covers AE2**) |
-| S5 proxy unreachable | U1 → U3 → U4 → U5 → U6 | Closed-port stub run skips catalog validation, invokes `agy`/Codex/Claude fallback binaries, logs downgrade, and terminates a missing-binary case (**Covers S5, Covers AE6**) |
-| S6 model-level failure | U1 → U3 → U4 → U5 → U6 | Stub returns 429 for primary and valid output for `fallback_model`; CLI provider spy remains unused (**Covers S6, Covers AE7**) |
+| S1 per-stage routing | U1 → U3 → U4 → U5 → U6 | `tests/integration/test_user_scenarios.py::test_run_routes_each_stage`, written in U6 step 1; stub catalog plus six-stage run with proxy model flags and `--executor claude` (**Covers S1, Covers AE3**) |
+| S2 command approval | U1 → U4 → U5 → U6 | `tests/integration/test_user_scenarios.py::test_non_tty_gate_requires_flag`; no command executes without `--auto-run`, paired authorized run proceeds (**Covers S2, Covers AE9**) |
+| S3 fresh rerun and resume | U1 → U4 → U5 → U6 | `tests/integration/test_user_scenarios.py::test_fresh_rerun_and_resume`; two real subprocesses interrupt after executor, fresh rerun repeats executor, `--resume` skips completed stages (**Covers S3, Covers AE4**) |
+| S4 review/fix loops | U2 → U4 → U5 → U6 | `tests/integration/test_user_scenarios.py::test_review_fix_loops`; main loop and Ralph Wiggum fixtures exercise separate caps and acceptance rules (**Covers S4, Covers AE2**) |
+| S5 proxy unreachable | U1 → U3 → U4 → U5 → U6 | `tests/integration/test_user_scenarios.py::test_proxy_unreachable_cli_fallback`; closed-port run skips catalog validation, invokes fallback binaries, logs downgrade, and terminates a missing-binary case (**Covers S5, Covers AE6**) |
+| S6 model-level failure | U1 → U3 → U4 → U5 → U6 | `tests/integration/test_user_scenarios.py::test_model_fallback_without_cli`; stub returns 429 for primary and valid output for `fallback_model`; CLI provider spy remains unused (**Covers S6, Covers AE7**) |
 
 # Implementation Units
 
@@ -181,7 +181,6 @@ Steps:
 
 Acceptance: focused tests pass; config precedence is deterministic; no binary name is sent to the
 model catalog; `pyproject.toml` declares the console script and Python floor.
-
 ## U2: Port models, prompts, and pure utilities
 
 Execution note: characterization-first
@@ -200,7 +199,7 @@ Interfaces:
   `orchestrator_cli.py` at `8ee3c4c`.
   Produces: identical enums and Pydantic field contracts, prompt constants with unchanged text,
   `extract_json_list()`, `extract_json_object()`, `extract_code_content()`, `generate_diff()`,
-  `generate_project_name()`, `generate_command_slug()`.
+  `generate_project_name()`, and `generate_command_slug()`.
 
 Test scenarios:
   happy: every legacy model fixture, prompt format, JSON extraction, fenced-code extraction, and
@@ -222,51 +221,60 @@ Steps:
   5. Commit: `feat: port orchestration models prompts and utilities`.
 
 Acceptance: all pure-port tests pass; prompt text is unchanged; the model public surface matches
-all legacy imports needed by U6 migration; no root module is deleted.
+all legacy imports needed by U3 and U6 migration; no root module is deleted.
 
-## U3: Implement HTTP, CLI, and routing providers
+## U3: Implement HTTP, CLI, legacy API, and routing providers
 
 Execution note: test-first
 
 Files:
   Create: `src/ai_orchestration/providers/base.py`, `src/ai_orchestration/providers/http.py`,
-  `src/ai_orchestration/providers/cli.py`, `src/ai_orchestration/providers/routing.py`,
-  `src/ai_orchestration/providers/__init__.py`, `tests/test_providers.py`,
-  `tests/test_routing.py`, `tests/fixtures/provider_responses/`
+  `src/ai_orchestration/providers/cli.py`, `src/ai_orchestration/providers/legacy_api.py`,
+  `src/ai_orchestration/providers/routing.py`, `src/ai_orchestration/providers/__init__.py`,
+  `tests/test_providers.py`, `tests/test_routing.py`, `tests/test_legacy_api.py`,
+  `tests/fixtures/provider_responses/`
   Modify: `src/ai_orchestration/config.py`
-  Test: `tests/test_providers.py`, `tests/test_routing.py`
+  Test: `tests/test_providers.py`, `tests/test_routing.py`, `tests/test_legacy_api.py`
 
 Interfaces:
-  Consumes: U1 config contracts; U2 Pydantic schemas and extraction helpers; OpenAI-compatible
-  completion response shape; `agy -p`, `codex exec`, and Claude print-mode argv contracts.
+  Consumes: U1 config contracts; U2 Pydantic schemas, extraction helpers, and legacy tool enums;
+  OpenAI-compatible completion responses; `agy -p`, `codex exec`, and Claude print-mode argv.
   Produces: `Provider`, `ProviderResult`, `AgyProvider`, `CodexProvider`, `ClaudeProvider`,
-  `HttpProvider`, `CatalogStatus`, `resolve_provider_chain()`, and structured failure classes.
+  `HttpProvider`, `LegacyAPITool`, `APIResponse`, `OpenAITool`, `AnthropicTool`, `GoogleAITool`,
+  `CatalogStatus`, `probe_catalog(base_url, api_key)`, `resolve_provider_chain()`, and typed
+  provider failures. `probe_catalog` is the explicit seam consumed by U1 config validation and
+  returns `reachable_with_models`, `reachable_without_id`, or `unreachable`.
 
 Test scenarios:
   happy: HTTP completion validates flat JSON; `agy` structured output validates; Codex and Claude
-  text output extracts a valid model; each binary builder returns exact argv.
+  text output extracts a valid model; each binary builder returns exact argv; legacy API adapters
+  preserve `generate`, `generate_stream`, `is_available`, and `APIResponse` fields.
   edge: prose around JSON, malformed structured output, absent catalog, timeout, empty stderr,
-  flat schemas without `$ref`/`$defs`, and a bare-string stage config.
+  flat schemas without `$ref`/`$defs`, a bare-string stage config, and each legacy API tool's
+  missing-key path.
   error: reachable catalog rejects unknown proxy ids; missing binaries fail startup; 401/403 fails
   without fallback; CLI nonzero, spawn error, timeout, and unparseable output terminate with
   binary-specific diagnostics.
   integration: primary 429 uses `fallback_model` and never invokes CLI; closed endpoint skips
-  catalog validation, uses `fallback_binary`, and records a downgrade (**Covers S5, Covers S6,
-  Covers AE5, Covers AE6, Covers AE7, Covers AE8**).
+  catalog validation, uses `fallback_binary`, and records a downgrade; a child emitting no output
+  for the heartbeat interval emits a heartbeat marker and stream-JSON chunks are extracted
+  (**Covers S5, Covers S6, Covers AE5, Covers AE6, Covers AE7, Covers AE8**).
 
 Steps:
   1. Write failing provider tests for exact argv, HTTP stub responses, flat schema serialization,
-     catalog outcomes, and every proxy/CLI failure row.
+     catalog outcomes, legacy API compatibility, heartbeat/stream-JSON behavior, and every
+     proxy/CLI failure row.
   2. Run focused provider tests; confirm failures occur before any live network call.
   3. Implement the shared protocol, official OpenAI client adapter, `agy` capability path, Codex
-     and Claude extract paths, catalog validation, and the explicit provider state machine.
-  4. Run focused tests with a local stub server and subprocess spies; confirm no test requires the
-     live proxy and fallback failures never escalate to another transport.
-  5. Commit: `feat: add proxy cli providers and fallback routing`.
+     and Claude extract paths, legacy API adapters, catalog probe seam, and provider state machine.
+  4. Run focused tests with a local stub server, subprocess spies, and heartbeat fixtures; confirm
+     no test requires the live proxy and fallback failures never escalate to another transport.
+  5. Commit: `feat: add proxy cli legacy-api providers and fallback routing`.
 
 Acceptance: provider tests pass offline; all slot kinds validate correctly; 429/5xx/model-output
 faults use `fallback_model`; transport faults use `fallback_binary`; CLI failures are terminal;
-`agy` never receives a positional prompt.
+`agy` never receives a positional prompt; legacy API tool tests pass; heartbeat and stream-JSON
+tests fail under mutation of their respective provider paths.
 
 ## U4: Implement durable engine, gates, loops, and stages
 
@@ -281,18 +289,21 @@ Files:
   Test: `tests/test_state.py`, `tests/test_gates.py`, `tests/test_loops.py`, `tests/test_stages.py`
 
 Interfaces:
-  Consumes: U1 config and errors; U2 context/prompt/util contracts; U3 provider chain; stage
-  role order and behavior inventory from the approved design.
+  Consumes: U1 config and errors; U2 context/prompt/util contracts; U3 provider chain; stage role
+  order and behavior inventory from the approved design.
   Produces: `RunState`, atomic save/load/resume functions, `ApprovalGate`, `PausedRun`,
   `execute_stage()`, `run_pipeline()`, `run_main_review_fix_loop()`,
   `run_ralph_wiggum_loop()`, `parse_approach_options()`, `CommandExecutor`, and structured
-  stage audit events.
+  stage audit events. `CommandExecutor` preserves the committed `retries=1` default, which means
+  two total attempts (`1 + retries`) and records both attempts in its audit output.
 
 Test scenarios:
-  happy: six stages execute in order; selected fixes apply; command audit JSON is written;
-  Ralph Wiggum accepts by decision or threshold; top three fixes carry forward.
-  edge: fresh rerun ignores stale state by default, resume skips completed stages, max retry caps
-  stop exactly, duplicate/template approaches are rejected, and empty review results pass.
+  happy: six stages execute in order; selected fixes apply; command audit JSON is written with two
+  attempts when the first command fails; Ralph Wiggum accepts by decision or threshold; top three
+  fixes carry forward.
+  edge: fresh rerun ignores stale state by default, resume skips completed stages, executor
+  self-healing stops at four attempts, duplicate/template approaches are rejected, and empty
+  review results pass.
   error: executor syntax errors retry four attempts with diff capture; command failure records
   stderr; non-TTY missing authorization exits nonzero without executing; malformed stage output
   preserves a resumable failure state.
@@ -302,19 +313,20 @@ Test scenarios:
 
 Steps:
   1. Write failing tests for atomic state transitions, gate fail-closed behavior, approach parsing,
-     executor self-healing, command audit logs, both loops, and two-process resume.
+     executor self-healing, exact two-attempt command retry/audit logs, both loops, and two-process
+     resume.
   2. Run focused tests; confirm failures identify absent engine behavior rather than provider
      transport.
   3. Implement state persistence with `os.replace`, gate decisions, stage registry, command
-     executor, loop semantics, and the six-stage ordered pipeline.
+     executor with `retries=1`, loop semantics, and the six-stage ordered pipeline.
   4. Run focused tests and the two-process fixture; inject failures at save, gate, provider, and
      child-process boundaries and inspect the expected partial states.
   5. Commit: `feat: implement durable six-stage orchestration engine`.
 
-Acceptance: engine tests pass; every behavior inventory row has a behavior test; the six stages
-remain sequential; resume, fresh rerun, fail-closed gates, audit logs, and both loops preserve the
+Acceptance: engine tests pass; every behavior inventory row has a behavior test including the
+heartbeat/stream-JSON row owned by U3; the six stages remain sequential; command retries total
+two attempts; resume, fresh rerun, fail-closed gates, audit logs, and both loops preserve the
 approved semantics.
-
 ## U5: Wire the Typer CLI and documentation
 
 Execution note: characterization-first
@@ -384,7 +396,7 @@ Execution note: characterization-first
 Files:
   Create: `tests/integration/test_user_scenarios.py`, `tests/integration/test_failure_matrix.py`,
   `.release-loop/evidence/U6/` fixture outputs
-  Modify: `tests/test_legacy_port.py`, `README.md`, `AGENTS.md`
+  Modify: `README.md`, `AGENTS.md`
   Delete: `orchestrator_cli.py`, `orchestration_context.py`, `llm_tools.py`, `api_tools.py`,
   `agent_prompts.py`, `tests/test_orchestrator_cli.py`, `tests/test_orchestration_context.py`,
   `tests/test_llm_tools.py`, `tests/test_api_tools.py`
@@ -404,7 +416,6 @@ Test scenarios:
   integration: run the complete suite, `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run python -m ai_orchestration.cli --help`, and the live proxy criterion when credentials
   are available (**Covers S1, Covers S2, Covers S3, Covers S4, Covers S5, Covers S6, Covers AE1–AE10**).
-
 Steps:
   1. Write the six scenario tests and failure-matrix fixtures before deleting root files; include
      same-kind invariant/changed-axis pairs for routing, gate, and workspace guards.
