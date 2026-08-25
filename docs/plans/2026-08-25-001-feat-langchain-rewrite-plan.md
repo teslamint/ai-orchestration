@@ -58,7 +58,7 @@ The origin spec retains live assumptions. Fresh planning evidence was collected 
 | A2 | Importing `ChatOpenAI`, `ChatAnthropic`, and `ChatGoogleGenerativeAI` from `langchain_community.chat_models` raised `ImportError`; the package emitted its sunset warning | match to approved contradiction | Do not use `langchain-community`; use the official OpenAI SDK and custom providers |
 | A3 | `uv run python` is Python 3.13; approved PyPI evidence says the planned LangChain-era floor must be at least 3.10 | match to approved contradiction | Set `requires-python >=3.10` and Ruff target `py310` |
 | A4 | The committed evidence probe returned `A4 REPRODUCED: shim loses the patch; owning module keeps it` | match to approved contradiction | Delete root modules only after successor tests pass; do not use shims |
-| A5 | The committed evidence probe exists; the approved two-process stdlib result remains the design basis | match to approved contradiction | Keep the engine custom and test resume across real subprocesses |
+| A5 | The approved in-session two-process stdlib result remains the design basis; no standalone A5 evidence file was committed | match to approved contradiction | Keep the engine custom and test resume across real subprocesses |
 | A6 | A live catalog request returned HTTP 401 without accepted credentials | unavailable | Use a stub catalog in automated tests; remeasure the live endpoint before Ship |
 | A7 | A live schema probe was not safely repeatable without accepted proxy credentials | unavailable | Test model capability variance with deterministic HTTP stubs and flat schemas; remeasure live before Ship |
 | A8 | `uv run python -c 'import httpx'` raised `ModuleNotFoundError` | match to approved contradiction | Do not rely on preinstalled `httpx`; add only required dependencies through `pyproject.toml` |
@@ -500,9 +500,10 @@ or observable rather than silently ignoring the tracker.
 | Outside-diff approval finding inventory | event-based | This plan has no merge gate implementation | Deferred to Ship/review |
 | Next PR merge requires Retro | event-based | No PR merge occurs in this plan | Deferred to Ship |
 
-Attestation: all open ROADMAP carry-forward rows were read; no edit-based trigger names a planned
-file or section, no drift-based trigger has an observable record in this repository, and every
-event-based row is explicitly classified as not fired or routed to the later Ship/Retro phase.
+Attestation: all 11 open ROADMAP carry-forward rows were read. One edit-based trigger fired —
+the forced-failure matrix rule — and was folded into the matrix with all six outcomes and safe
+injection/compensation evidence. The remaining rows are classified as not fired, conditionally
+deferred, or routed to the later Ship/Retro phase; no row is silently omitted.
 
 # Deferred to Follow-Up Work
 
