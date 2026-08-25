@@ -153,9 +153,12 @@ Files:
 
 Interfaces:
   Consumes: approved default model table; existing `OrchestratorConfig` fields; existing CLI
-  option names; `ORCHESTRATOR_WORKSPACE` and `--workspace` precedence.
-  Produces: `StageConfig`, `ProviderConfig`, `OrchestratorConfig`, `resolve_workspace_base()`,
-  `resolve_stage_config()`, typed error classes, package metadata, console-script declaration.
+  option names; `ORCHESTRATOR_WORKSPACE` and `--workspace` precedence. U1 does not call the
+  network or implement catalog probing; it defines slot-kind validation and an injectable
+  `CatalogStatus` protocol boundary that U3 supplies as `probe_catalog()`.
+  Produces: `StageConfig`, `ProviderConfig`, `OrchestratorConfig`, `CatalogStatus` protocol,
+  `resolve_workspace_base()`, `resolve_stage_config()`, typed error classes, package metadata,
+  and console-script declaration.
 
 Test scenarios:
   happy: config file loads a stage object with `model`, `fallback_model`, and `fallback_binary`;
@@ -163,8 +166,8 @@ Test scenarios:
   edge: CLI stage flag overrides config, config overrides built-in defaults, absolute workspace
   paths remain absolute, and missing optional fallback model remains `None`.
   error: invalid proxy slot, invalid binary slot, malformed config, and unknown stage fail with
-  stage-specific diagnostics; a closed catalog is represented as an unavailable catalog rather
-  than an invalid model.
+  stage-specific diagnostics; catalog status is accepted through the injectable boundary without
+  making a network call.
   integration: installed package exposes `ai-orchestration` and writes beneath the resolved
   workspace anchor (**Covers S1, Covers S3, Covers AE3**).
 
@@ -215,8 +218,10 @@ Steps:
   1. Port the four legacy model suites' assertions into the new test paths and add pure utility
      characterization fixtures before deleting any root file.
   2. Run the focused tests; confirm each failure identifies a missing package symbol or mismatch.
-  3. Copy behavior into the new modules without changing enum values, field defaults, prompt text,
-     extraction precedence, or diff output.
+  3. Copy behavior into the new modules without changing context-model enum values, field defaults,
+     prompt text, extraction precedence, or diff output. The provider-owned `ToolType.GEMINI` to
+     `ToolType.AGY` rename is the explicit exception assigned to U3 and is tested there.
+
   4. Run focused tests plus the committed four-suite baseline; confirm 93 baseline cases pass.
   5. Commit: `feat: port orchestration models prompts and utilities`.
 
@@ -243,18 +248,27 @@ Interfaces:
   `HttpProvider`, `LegacyAPITool`, `APIResponse`, `OpenAITool`, `AnthropicTool`, `GoogleAITool`,
   `CatalogStatus`, `probe_catalog(base_url, api_key)`, `resolve_provider_chain()`, and typed
   provider failures. `probe_catalog` is the explicit seam consumed by U1 config validation and
-  returns `reachable_with_models`, `reachable_without_id`, or `unreachable`.
+  returns `reachable_with_models`, `reachable_without_id`, or `unreachable`. This unit also owns
+  the approved `ToolType.GEMINI` → `ToolType.AGY` rename: `AGY = "agy"` replaces the CLI enum
+  value, `LLMToolConfig.brainstormer` defaults to `AGY`, and the three `*_API` enum values remain
+  unchanged. It also ports `validate_tool_config(config) -> list[str]` unchanged as a
+  non-fatal compatibility API: it returns PATH warnings for configured CLI tools and never
+  replaces them with startup errors. New startup validation is a separate caller and may fail
+  fast without changing this legacy function's return type or warning text contract.
 
 Test scenarios:
   happy: HTTP completion validates flat JSON; `agy` structured output validates; Codex and Claude
   text output extracts a valid model; each binary builder returns exact argv; legacy API adapters
-  preserve `generate`, `generate_stream`, `is_available`, and `APIResponse` fields.
+  preserve `generate`, `generate_stream`, `is_available`, and `APIResponse` fields; the
+  brainstormer default resolves to `ToolType.AGY` and all three `*_API` values still construct;
+  `validate_tool_config()` returns a list and includes the committed warning for a missing CLI.
   edge: prose around JSON, malformed structured output, absent catalog, timeout, empty stderr,
-  flat schemas without `$ref`/`$defs`, a bare-string stage config, and each legacy API tool's
-  missing-key path.
-  error: reachable catalog rejects unknown proxy ids; missing binaries fail startup; 401/403 fails
-  without fallback; CLI nonzero, spawn error, timeout, and unparseable output terminate with
-  binary-specific diagnostics.
+  flat schemas without `$ref`/`$defs`, a bare-string stage config, each legacy API tool's
+  missing-key path, and an empty warning list when all configured tools are available.
+  error: `ToolType("gemini")` no longer selects a CLI provider; reachable catalog rejects unknown
+  proxy ids; missing binaries fail startup; 401/403 fails without fallback; CLI nonzero, spawn
+  error, timeout, and unparseable output terminate with binary-specific diagnostics. The new
+  fail-fast diagnostic path is tested separately from the preserved warning-list API.
   integration: primary 429 uses `fallback_model` and never invokes CLI; closed endpoint skips
   catalog validation, uses `fallback_binary`, and records a downgrade; a child emitting no output
   for the heartbeat interval emits a heartbeat marker and stream-JSON chunks are extracted
@@ -460,6 +474,8 @@ or observable rather than silently ignoring the tracker.
 | Facilitator/reviewer output persistence | edit-based | This plan does not touch compound-loop review protocol files | Deferred; no planned file match |
 | Review verifies invariant, not sealed plan | event-based | This plan has no reviewing contract change | Deferred; no event fired |
 | Severity graded against threatened criterion | event-based | This plan does not change review triage | Deferred; no event fired |
+| Dispatched committer SSH socket evidence | event-based | No implementation unit is authorized to dispatch committing subagents; all planned commits are local user-gated commits. If implementation dispatch is later enabled, pass `SSH_AUTH_SOCK` explicitly and verify `%G?` for every commit before accepting it | Deferred conditionally; no event fired in this plan |
+| Forced-failure matrix partial-state and shell-syntax rule | edit-based | This plan edits a stateful mutation matrix and therefore fires the durable rule from the 2026-08-05 retro | Folded into this plan: every matrix row names exact partial state, safe injection boundary, compensation, and all six outcomes; U6 validates the matrix fixtures |
 | Next isolated-worktree Retro final action | event-based | Retro is not part of this implementation unit | Deferred to release-loop Retro |
 | `gh pr merge` cleanup collision | event-based | No remote merge or branch cleanup is planned in these units | Deferred to Ship |
 | Canonical evidence generation | event-based | No compound-loop evidence publisher is changed | Deferred; no event fired |
