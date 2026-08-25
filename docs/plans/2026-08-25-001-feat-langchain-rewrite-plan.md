@@ -358,6 +358,25 @@ Acceptance: CLI tests and smoke checks pass; README and AGENTS describe `agy` ra
 `gemini` as the subprocess; the command is discoverable through the project script; user-facing
 messages name stage, model, endpoint, binary, exit code, or authorizing flag as applicable.
 
+## External prerequisite before U6
+
+U6 has a blocked boundary that no unit can clear: the main checkout at
+`/Users/teslamint/workspace/ai-orchestration` contains protected uncommitted user work. U1–U5
+must not stage, commit, revert, delete, or otherwise decide that work. Before U6 starts, the user
+must independently choose the fate of every main-checkout change and leave that checkout clean.
+
+The prerequisite evidence is the exact Risk 6 command, run from the feature worktree:
+
+```bash
+MAIN=$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')
+git -C "$MAIN" status --porcelain
+```
+
+U6 is **blocked**, not partially complete, while this command produces any output. A clean result
+is an external precondition, not an acceptance outcome produced by U1–U5. The user may preserve
+the work by committing or moving it elsewhere, discard it only by their own decision, or defer
+U6; this plan authorizes none of those actions.
+
 ## U6: Port full coverage and perform clean cutover
 
 Execution note: characterization-first
@@ -416,7 +435,7 @@ boundaries. Evidence owners write disposable fixtures under `.release-loop/evide
 | Approval gate pause | Stage reaches command or fix gate | Persist pause reason and required flag, exit nonzero | No command/fix action; resumable paused state | U4/U6 | U6 failure-matrix fixture | Authorized resume proceeds once | Inject gate decision failure; no command runs | Re-run without authorization remains paused with no duplicate execution | Delete fixture state only; no external command compensation needed because none ran | Non-TTY fails closed with exact flag diagnostic | Cancel at gate leaves paused state for explicit user cleanup |
 | CLI fallback downgrade | Proxy call fails transport; fallback binary exists | Record downgrade and invoke binary | Stage output and audit log name primary model and binary | U3/U6 | U6 routing fixture | Closed-port fixture completes through fallback | Make fallback binary exit nonzero; stage fails with exit/stderr and no proxy retry | Retry from saved pre-stage state makes one new attempt | Restore pre-stage state; generated files are fixture-local | No prompt required for fallback | Cancellation terminates child and preserves pre-stage checkpoint |
 | Model fallback | Primary proxy returns 429/invalid output; fallback model configured | Call same endpoint with fallback model | Stage output names both model ids and CLI spy remains unused | U3/U6 | U6 routing fixture | Stub primary/fallback pair completes | Make fallback model fail; stage terminates with both diagnostics | Retry from pre-stage state does not reuse partial primary output | Restore pre-stage state; no external side effect | Stub run is non-interactive | Cancel between calls preserves pre-stage checkpoint |
-| Clean cutover | Package tests green; main checkout may be dirty | Verify main checkout status, delete roots, run final checks, commit | Package-only tree with clean validation and one cutover commit | U6 | U6 cutover evidence | Guard empty, deletion and checks pass, commit exists | Guard non-empty or check failure stops before deletion, or after deletion leaves uncommitted deletion for operator recovery | Rerun only after restoring or intentionally reviewing partial deletion; no second delete commit | Restore deleted roots from HEAD before retry; never revert main checkout user work | Headless mode refuses deletion when guard output is non-empty | Cancellation before commit leaves explicit package/root diff for operator review |
+| Clean cutover | U6 external prerequisite satisfied: main checkout status command returns empty output; package tests green | Verify main checkout status, delete roots, run final checks, commit | Package-only tree with clean validation and one cutover commit | U6 | U6 cutover evidence | Guard empty, deletion and checks pass, commit exists | Guard non-empty stops before deletion; any later check failure leaves an explicit package/root diff for operator recovery | Rerun only after user satisfies the prerequisite and, if needed, restores a partial deletion; no second delete commit | Restore deleted roots from HEAD before retry; never revert main checkout user work | Headless mode refuses deletion when guard output is non-empty | Cancellation before commit leaves explicit package/root diff for operator review |
 
 # Carry-forward trigger audit
 
@@ -430,7 +449,6 @@ or observable rather than silently ignoring the tracker.
 | Facilitator/reviewer output persistence | edit-based | This plan does not touch compound-loop review protocol files | Deferred; no planned file match |
 | Review verifies invariant, not sealed plan | event-based | This plan has no reviewing contract change | Deferred; no event fired |
 | Severity graded against threatened criterion | event-based | This plan does not change review triage | Deferred; no event fired |
-| Dispatched committer SSH socket evidence | event-based | Plan commits are local user-gated commits, not dispatched implementation commits | Deferred; no event fired |
 | Next isolated-worktree Retro final action | event-based | Retro is not part of this implementation unit | Deferred to release-loop Retro |
 | `gh pr merge` cleanup collision | event-based | No remote merge or branch cleanup is planned in these units | Deferred to Ship |
 | Canonical evidence generation | event-based | No compound-loop evidence publisher is changed | Deferred; no event fired |
