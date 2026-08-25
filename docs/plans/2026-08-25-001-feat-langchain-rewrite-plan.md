@@ -130,6 +130,13 @@ become a false match.
   configuration, legacy `*_api` compatibility tool values, workspace anchor, and verification
   commands.
 - Delete root modules and legacy test files only in U6 after successor coverage is green.
+
+## Scenario coverage map
+
+The approved origin spec contains six User Scenarios. Each row names the ordered units and an
+integration scenario that walks the user-visible path. `AE<N>` denotes approved spec Success
+Criterion N in `docs/specs/2026-08-24-orchestration-rewrite-design-v2.md` §Success Criteria.
+
 | Scenario | Ordered unit chain | Scenario evidence |
 |---|---|---|
 | S1 per-stage routing | U1 → U3 → U4 → U5 → U6 | `tests/integration/test_user_scenarios.py::test_run_routes_each_stage`, written in U6 step 1; stub catalog plus six-stage run with proxy model flags and `--executor claude` (**Covers S1, Covers AE3**) |
@@ -164,12 +171,13 @@ Test scenarios:
   happy: config file loads a stage object with `model`, `fallback_model`, and `fallback_binary`;
   bare stage string loads as `{"model": value}`.
   edge: CLI stage flag overrides config, config overrides built-in defaults, absolute workspace
-  paths remain absolute, and missing optional fallback model remains `None`.
   error: invalid proxy slot, invalid binary slot, malformed config, and unknown stage fail with
   stage-specific diagnostics; catalog status is accepted through the injectable boundary without
   making a network call.
   integration: installed package exposes `ai-orchestration` and writes beneath the resolved
-  workspace anchor (**Covers S1, Covers S3, Covers AE3**).
+  workspace anchor (**Covers S1, Covers S3**; component prerequisite for AE3, whose live
+  enforcement is U6).
+
 
 Steps:
   1. Write failing config tests for defaults, precedence, bare strings, workspace anchor, and
@@ -192,17 +200,19 @@ Files:
   Create: `src/ai_orchestration/models/context.py`, `src/ai_orchestration/models/__init__.py`,
   `src/ai_orchestration/prompts/__init__.py`, `src/ai_orchestration/prompts/stages.py`,
   `src/ai_orchestration/utils/extract.py`, `src/ai_orchestration/utils/diff.py`,
-  `src/ai_orchestration/utils/slug.py`, `tests/test_models.py`, `tests/test_utils.py`,
-  `tests/test_prompts.py`
+  `src/ai_orchestration/utils/slug.py`, `docs/evidence/legacy-successor-inventory.md`,
+  `tests/test_models.py`, `tests/test_utils.py`, `tests/test_prompts.py`
   Modify: none
   Test: `tests/test_models.py`, `tests/test_utils.py`, `tests/test_prompts.py`
 
 Interfaces:
   Consumes: committed `orchestration_context.py`, `agent_prompts.py`, and pure helpers in
   `orchestrator_cli.py` at `8ee3c4c`.
-  Produces: identical enums and Pydantic field contracts, prompt constants with unchanged text,
-  `extract_json_list()`, `extract_json_object()`, `extract_code_content()`, `generate_diff()`,
-  `generate_project_name()`, and `generate_command_slug()`.
+  Produces: identical context-model enums and Pydantic field contracts, prompt constants with
+  unchanged text, `extract_json_list()`, `extract_json_object()`, `extract_code_content()`,
+  `generate_diff()`, `generate_project_name()`, and `generate_command_slug()`. The inventory
+  artifact records every legacy test name and its named successor; ToolType CLI rename remains
+  explicitly owned by U3.
 
 Test scenarios:
   happy: every legacy model fixture, prompt format, JSON extraction, fenced-code extraction, and
@@ -215,18 +225,20 @@ Test scenarios:
   prompt text to the committed constants (**Covers S4, Covers AE1**).
 
 Steps:
-  1. Port the four legacy model suites' assertions into the new test paths and add pure utility
-     characterization fixtures before deleting any root file.
+  1. Port the four legacy model suites' assertions into the new test paths, write
+     `docs/evidence/legacy-successor-inventory.md` with all 93 legacy test names and successor
+     paths, and add pure utility characterization fixtures before deleting any root file.
   2. Run the focused tests; confirm each failure identifies a missing package symbol or mismatch.
   3. Copy behavior into the new modules without changing context-model enum values, field defaults,
      prompt text, extraction precedence, or diff output. The provider-owned `ToolType.GEMINI` to
      `ToolType.AGY` rename is the explicit exception assigned to U3 and is tested there.
-
-  4. Run focused tests plus the committed four-suite baseline; confirm 93 baseline cases pass.
+  4. Run focused tests plus the committed four-suite baseline; confirm 93 baseline cases pass and
+     every baseline test name appears exactly once in the inventory artifact.
   5. Commit: `feat: port orchestration models prompts and utilities`.
 
 Acceptance: all pure-port tests pass; prompt text is unchanged; the model public surface matches
-all legacy imports needed by U3 and U6 migration; no root module is deleted.
+all legacy imports needed by U3 and U6 migration; the successor inventory contains all 93 legacy
+test names with one named successor each; no root module is deleted.
 
 ## U3: Implement HTTP, CLI, legacy API, and routing providers
 
@@ -238,7 +250,7 @@ Files:
   `src/ai_orchestration/providers/routing.py`, `src/ai_orchestration/providers/__init__.py`,
   `tests/test_providers.py`, `tests/test_routing.py`, `tests/test_legacy_api.py`,
   `tests/fixtures/provider_responses/`
-  Modify: `src/ai_orchestration/config.py`
+  Modify: `src/ai_orchestration/config.py`, `README.md`, `AGENTS.md`
   Test: `tests/test_providers.py`, `tests/test_routing.py`, `tests/test_legacy_api.py`
 
 Interfaces:
@@ -346,9 +358,9 @@ approved semantics.
 Execution note: characterization-first
 
 Files:
-  Create: `src/ai_orchestration/cli.py`
+  Create: `src/ai_orchestration/cli.py`, `tests/test_cli.py`, `tests/test_smoke.py`
   Modify: `src/ai_orchestration/__init__.py`, `src/ai_orchestration/config.py`, `README.md`,
-  `AGENTS.md`, `pyproject.toml`, `tests/test_cli.py`, `tests/test_smoke.py`
+  `AGENTS.md`, `pyproject.toml`
   Test: `tests/test_cli.py`, `tests/test_smoke.py`
 
 Interfaces:
@@ -368,7 +380,8 @@ Test scenarios:
   error: unknown model, unavailable catalog, missing binary, non-TTY gate, provider failure, and
   malformed config return nonzero with the stage and required flag or slot in the message.
   integration: installed command smoke test writes exactly beneath `--workspace` and a default
-  help invocation exits 0 (**Covers S1, Covers S2, Covers S3, Covers S5, Covers AE3, Covers AE9**).
+  help invocation exits 0 (**Covers S1, Covers S2, Covers S3, Covers S5, Covers AE9**; component
+  prerequisite for AE3, whose live enforcement is U6).
 
 Steps:
   1. Write CLI option-parity and workspace smoke tests against U1–U4 fakes.
@@ -417,24 +430,29 @@ Files:
   Test: all new tests, integration tests, and the final full suite
 
 Interfaces:
-  Consumes: U1–U5 public APIs; committed legacy test names; approved behavior inventory; main
-  checkout cutover guard from Risk 6.
+  Consumes: U1–U5 public APIs; `docs/evidence/legacy-successor-inventory.md` containing all
+  committed legacy test names and named successors; approved behavior inventory; main checkout
+  cutover guard from Risk 6.
   Produces: no legacy root import surface; complete package-only distribution; scenario evidence,
-  mutation evidence, and a clean final test/lint/format state.
+  mutation evidence, a verified 93-name successor inventory, and a clean final test/lint/format
+  state.
 
 Test scenarios:
   happy: all ten acceptance criteria and S1–S6 integration paths pass with fake/stub providers;
   edge: installed entrypoint and direct module invocation resolve the same workspace and options.
   error: mutate each inventory behavior, provider routing branch, gate guard, and `agy` argv token;
-  the corresponding test fails; missing main-checkout cleanliness aborts before deletion.
-  integration: run the complete suite, `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run python -m ai_orchestration.cli --help`, and the live proxy criterion when credentials
+  the corresponding test fails; a missing or duplicate inventory successor fails before deletion;
+  missing main-checkout cleanliness aborts before deletion.
+  integration: run the complete suite, verify the inventory has 93 unique legacy names with one
+  successor each, run `uv run ruff check .`, `uv run ruff format --check .`,
+  `uv run python -m ai_orchestration.cli --help`, and run the live proxy criterion when credentials
   are available (**Covers S1, Covers S2, Covers S3, Covers S4, Covers S5, Covers S6, Covers AE1–AE10**).
+
 Steps:
   1. Write the six scenario tests and failure-matrix fixtures before deleting root files; include
      same-kind invariant/changed-axis pairs for routing, gate, and workspace guards.
   2. Run the full pre-cutover suite; confirm 93 committed baseline cases plus all new contract
-     tests pass.
+     tests pass and verify the successor inventory has exactly 93 unique legacy names.
   3. Run the exact main-checkout guard from Risk 6; if output is non-empty, stop and report the
      paths without staging, reverting, or deleting anything.
   4. Delete root modules and legacy test files, update package-only imports, then run the full
