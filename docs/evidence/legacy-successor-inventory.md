@@ -23,12 +23,12 @@ llm_tools/api_tools rows (42) are U3's per the approved unit ownership.
 | `test_generate_project_name_from_goal` | `tests/test_utils.py::test_generate_project_name_from_goal` |
 | `test_generate_project_name_non_english` | `tests/test_utils.py::test_generate_project_name_non_english` |
 | `test_generate_project_name_length_limit` | `tests/test_utils.py::test_generate_project_name_length_limit` |
-| `test_main_has_auto_select_option` | `tests/test_cli.py::test_main_has_auto_select_option` (U5) |
-| `test_cli_auto_select_option_help` | `tests/test_cli.py::test_cli_auto_select_option_help` (U5) |
-| `test_main_has_project_name_option` | `tests/test_cli.py::test_main_has_project_name_option` (U5) |
-| `test_cli_project_name_option_help` | `tests/test_cli.py::test_cli_project_name_option_help` (U5) |
-| `test_main_has_tool_options` | `tests/test_cli.py::test_main_has_stage_model_options` (U5) |
-| `test_cli_tool_options_help` | `tests/test_cli.py::test_cli_stage_model_options_help` (U5) |
+| `test_main_has_auto_select_option` | `tests/test_cli.py::test_help_lists_every_preserved_option` (U5) |
+| `test_cli_auto_select_option_help` | `tests/test_cli.py::test_help_lists_every_preserved_option` (U5) |
+| `test_main_has_project_name_option` | `tests/test_cli.py::test_help_lists_every_preserved_option` (U5) |
+| `test_cli_project_name_option_help` | `tests/test_cli.py::test_help_lists_every_preserved_option` (U5) |
+| `test_main_has_tool_options` | `tests/test_cli.py::test_help_lists_every_preserved_option` (U5) |
+| `test_cli_tool_options_help` | `tests/test_cli.py::test_help_lists_every_preserved_option` (U5) |
 | `test_orchestrator_config_has_tool_config` | `tests/test_config.py::test_default_table_covers_all_six_stages` (U1, already passing) |
 
 ## tests/test_orchestration_context.py (34)
@@ -103,7 +103,7 @@ legacy assertion by design.
 | `TestLLMToolFactory::test_create_gemini` | `tests/test_providers.py::test_create_agy_provider` |
 | `TestLLMToolFactory::test_create_codex` | `tests/test_providers.py::test_create_codex_provider` |
 | `TestLLMToolFactory::test_create_claude` | `tests/test_providers.py::test_create_claude_provider` |
-| `TestLLMToolFactory::test_get_tool_for_stage` | `tests/test_routing.py::test_resolve_provider_chain_for_stage` |
+| `TestLLMToolFactory::test_get_tool_for_stage` | `tests/test_routing.py::test_resolve_provider_chain_proxy_model_returns_http_provider` |
 | `TestLoadToolConfig::test_load_default` | `tests/test_config.py::test_resolve_stage_config_falls_back_to_built_in_default` (U1, already passing) |
 | `TestLoadToolConfig::test_load_with_cli_options` | `tests/test_config.py::test_resolve_stage_config_cli_flag_overrides_config_and_default` (U1, already passing) |
 | `TestLoadToolConfig::test_load_from_file` | `tests/test_config.py::test_resolve_stage_config_file_overrides_built_in_default` (U1, already passing) |
@@ -119,25 +119,25 @@ adapters, `ToolType.GEMINI_API`/`OPENAI_API`/`ANTHROPIC_API` unchanged).
 | Legacy test | Successor |
 |---|---|
 | `TestAPIResponse::test_api_response_creation` | `tests/test_legacy_api.py::test_api_response_creation` |
-| `TestOpenAITool::test_model_name` | `tests/test_legacy_api.py::test_openai_tool_model_name` |
-| `TestOpenAITool::test_is_available_with_env` | `tests/test_legacy_api.py::test_openai_tool_is_available_with_env` |
-| `TestOpenAITool::test_is_available_without_env` | `tests/test_legacy_api.py::test_openai_tool_is_available_without_env` |
-| `TestAnthropicTool::test_model_name` | `tests/test_legacy_api.py::test_anthropic_tool_model_name` |
-| `TestAnthropicTool::test_is_available_with_env` | `tests/test_legacy_api.py::test_anthropic_tool_is_available_with_env` |
-| `TestAnthropicTool::test_is_available_without_env` | `tests/test_legacy_api.py::test_anthropic_tool_is_available_without_env` |
-| `TestGoogleAITool::test_model_name` | `tests/test_legacy_api.py::test_google_tool_model_name` |
-| `TestGoogleAITool::test_is_available_with_env` | `tests/test_legacy_api.py::test_google_tool_is_available_with_env` |
-| `TestGoogleAITool::test_is_available_without_env` | `tests/test_legacy_api.py::test_google_tool_is_available_without_env` |
-| `TestLLMToolFactoryAPITools::test_is_api_tool_gemini_api` | `tests/test_legacy_api.py::test_is_api_tool_gemini_api` |
-| `TestLLMToolFactoryAPITools::test_is_api_tool_openai_api` | `tests/test_legacy_api.py::test_is_api_tool_openai_api` |
-| `TestLLMToolFactoryAPITools::test_is_api_tool_anthropic_api` | `tests/test_legacy_api.py::test_is_api_tool_anthropic_api` |
-| `TestLLMToolFactoryAPITools::test_is_api_tool_cli_tools` | `tests/test_legacy_api.py::test_is_api_tool_cli_tools` |
-| `TestLLMToolFactoryAPITools::test_create_api_tool_openai` | `tests/test_legacy_api.py::test_create_api_tool_openai` |
-| `TestLLMToolFactoryAPITools::test_create_api_tool_anthropic` | `tests/test_legacy_api.py::test_create_api_tool_anthropic` |
-| `TestLLMToolFactoryAPITools::test_create_api_tool_gemini` | `tests/test_legacy_api.py::test_create_api_tool_gemini` |
-| `TestLLMToolFactoryAPITools::test_create_api_tool_invalid` | `tests/test_legacy_api.py::test_create_api_tool_invalid` |
-| `TestToolTypeAPIValues::test_api_tool_type_values` | `tests/test_legacy_api.py::test_api_tool_type_values` |
-| `TestToolTypeAPIValues::test_api_tool_type_from_string` | `tests/test_legacy_api.py::test_api_tool_type_from_string` |
+| `TestOpenAITool::test_model_name` | `tests/test_legacy_api.py::TestOpenAITool::test_openai_tool_model_name` |
+| `TestOpenAITool::test_is_available_with_env` | `tests/test_legacy_api.py::TestOpenAITool::test_openai_tool_is_available_with_env` |
+| `TestOpenAITool::test_is_available_without_env` | `tests/test_legacy_api.py::TestOpenAITool::test_openai_tool_is_available_without_env` |
+| `TestAnthropicTool::test_model_name` | `tests/test_legacy_api.py::TestAnthropicTool::test_anthropic_tool_model_name` |
+| `TestAnthropicTool::test_is_available_with_env` | `tests/test_legacy_api.py::TestAnthropicTool::test_anthropic_tool_is_available_with_env` |
+| `TestAnthropicTool::test_is_available_without_env` | `tests/test_legacy_api.py::TestAnthropicTool::test_anthropic_tool_is_available_without_env` |
+| `TestGoogleAITool::test_model_name` | `tests/test_legacy_api.py::TestGoogleAITool::test_google_tool_model_name` |
+| `TestGoogleAITool::test_is_available_with_env` | `tests/test_legacy_api.py::TestGoogleAITool::test_google_tool_is_available_with_env` |
+| `TestGoogleAITool::test_is_available_without_env` | `tests/test_legacy_api.py::TestGoogleAITool::test_google_tool_is_available_without_env` |
+| `TestLLMToolFactoryAPITools::test_is_api_tool_gemini_api` | `tests/test_legacy_api.py::TestLLMToolFactoryAPITools::test_is_api_tool_gemini_api` |
+| `TestLLMToolFactoryAPITools::test_is_api_tool_openai_api` | `tests/test_legacy_api.py::TestLLMToolFactoryAPITools::test_is_api_tool_openai_api` |
+| `TestLLMToolFactoryAPITools::test_is_api_tool_anthropic_api` | `tests/test_legacy_api.py::TestLLMToolFactoryAPITools::test_is_api_tool_anthropic_api` |
+| `TestLLMToolFactoryAPITools::test_is_api_tool_cli_tools` | `tests/test_legacy_api.py::TestLLMToolFactoryAPITools::test_is_api_tool_cli_tools` |
+| `TestLLMToolFactoryAPITools::test_create_api_tool_openai` | `tests/test_legacy_api.py::TestLLMToolFactoryAPITools::test_create_api_tool_openai` |
+| `TestLLMToolFactoryAPITools::test_create_api_tool_anthropic` | `tests/test_legacy_api.py::TestLLMToolFactoryAPITools::test_create_api_tool_anthropic` |
+| `TestLLMToolFactoryAPITools::test_create_api_tool_gemini` | `tests/test_legacy_api.py::TestLLMToolFactoryAPITools::test_create_api_tool_gemini` |
+| `TestLLMToolFactoryAPITools::test_create_api_tool_invalid` | `tests/test_legacy_api.py::TestLLMToolFactoryAPITools::test_create_api_tool_invalid` |
+| `TestToolTypeAPIValues::test_api_tool_type_values` | `tests/test_legacy_api.py::TestToolTypeAPIValues::test_api_tool_type_values` |
+| `TestToolTypeAPIValues::test_api_tool_type_from_string` | `tests/test_legacy_api.py::TestToolTypeAPIValues::test_api_tool_type_from_string` |
 
 ## Totals
 

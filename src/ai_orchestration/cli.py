@@ -479,6 +479,11 @@ def main(
 
     state_path = project_workspace / ".ai_orchestration" / "run_state.json"
     run_state = resolve_run_start(state_path, resume=resume)
+    if run_state.completed_stages and "context" in run_state.outputs:
+        # Resume: restore the full context (implementation_plan, diffs,
+        # review results, etc.) so stages after the resumed point have the
+        # data earlier stages produced, not an empty context.
+        context = OrchestrationContext.model_validate(run_state.outputs["context"])
 
     command_executor = CommandExecutor(
         auto_approve=auto_approve, retries=1, log_directory=Path("execution_logs")
@@ -498,6 +503,7 @@ def main(
                     config_snapshot={"stages": {k: v.model for k, v in stages.items()}},
                     completed_stages=run_state.completed_stages,
                     current_stage=stage_name,
+                    outputs={"context": context.model_dump(mode="json")},
                     pause_reason=exc.pause_reason,
                 ),
                 state_path,
@@ -508,6 +514,18 @@ def main(
             )
             raise typer.Exit(code=exc.exit_code) from exc
         run_state.completed_stages.append(stage_name)
+        save_state(
+            RunState(
+                goal=request,
+                project_name=project_name,
+                config_snapshot={"stages": {k: v.model for k, v in stages.items()}},
+                completed_stages=run_state.completed_stages,
+                current_stage=None,
+                outputs={"context": context.model_dump(mode="json")},
+                pause_reason=None,
+            ),
+            state_path,
+        )
 
     try:
         _gated_run_stage(
@@ -536,8 +554,8 @@ def main(
 
         if not skip_review:
 
-            def _run_review():
-                _run_code_reviewer(context, stages["code_reviewer"])
+            def _run_review(ctx):
+                _run_code_reviewer(ctx, stages["code_reviewer"])
 
             def _run_fix(ctx, item):
                 _run_fixer(ctx, stages["fixer"], item)

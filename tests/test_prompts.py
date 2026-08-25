@@ -1,37 +1,70 @@
-"""Characterization tests for ported prompt templates (U2).
+"""Characterization tests for ported prompt templates (U2/U6).
 
-Asserts prompt text is unchanged and templates format with all required
-fields to produce byte-equivalent output to the committed constants
-(Covers S4, Covers AE1).
+Prompt text is unchanged from the committed `agent_prompts.py` at `8ee3c4c`
+(§Scope/Out: "Changing prompt wording" is out of scope). U2 verified this by
+live byte comparison against the legacy module while it still existed; U6
+deletes that module (clean cutover), so this suite pins the MD5 hashes
+captured at that comparison instead of re-importing a file that no longer
+exists.
 """
 
-import sys
-from pathlib import Path
+import hashlib
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-import agent_prompts as legacy_prompts
 from ai_orchestration.prompts import stages as new_prompts
 
+# MD5(system), MD5(user) captured from a live byte-for-byte comparison
+# against the committed `agent_prompts.py` (at 8ee3c4c) before its deletion
+# in U6's clean cutover.
+_COMMITTED_PROMPT_HASHES = {
+    "brainstormer": (
+        "7937b65716398bb2ffafc13fe59bffc3",
+        "69cb97db3acad258abbe9379805f8986",
+    ),
+    "brainstorming_reviewer": (
+        "f896f68cdce53ee60e3dfe79d6c7e15f",
+        "c0c1a6fc4d4fd05ecc19a7a5d2b10818",
+    ),
+    "planner": (
+        "d19246bbac859a971777da6565c3570d",
+        "4c30acb6969f3fdf4125fdbb9595039e",
+    ),
+    "executor": (
+        "87acfa330509b04f03ef6a2fa7063ba7",
+        "94bbbb31561df0bd9af21368810ebffa",
+    ),
+    "code_reviewer": (
+        "73e59fdb58d07ac2eda568e150b710ec",
+        "0d21c1096b42de75e9b055c1d1b5334c",
+    ),
+    "fixer": (
+        "c34755c9b839991fe87cf7c892614abb",
+        "20c411740c6b76d92cbddbf440d7a9f8",
+    ),
+    "ralph_wiggum_reviewer": (
+        "cfb22732f0d41cbdd8b8b67feef424bb",
+        "349d2d0a5b92bfa00e5757c62386835b",
+    ),
+}
 
-def test_agent_prompts_dict_has_same_stage_keys():
-    # ai_orchestration owns the routing enum via StageConfig; the prompt
-    # dict itself is a pure data structure ported verbatim.
-    assert set(new_prompts.AGENT_PROMPTS) == set(legacy_prompts.AGENT_PROMPTS)
+
+def _md5(text: str) -> str:
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
-def test_all_system_prompts_are_byte_identical():
-    for stage_name, legacy_entry in legacy_prompts.AGENT_PROMPTS.items():
-        new_entry = new_prompts.AGENT_PROMPTS[stage_name]
-        assert new_entry["system"] == legacy_entry["system"], stage_name
+def test_agent_prompts_dict_has_all_seven_stage_keys():
+    assert set(new_prompts.AGENT_PROMPTS) == set(_COMMITTED_PROMPT_HASHES)
 
 
-def test_all_user_templates_are_byte_identical():
-    for stage_name, legacy_entry in legacy_prompts.AGENT_PROMPTS.items():
-        new_entry = new_prompts.AGENT_PROMPTS[stage_name]
-        assert new_entry["user"] == legacy_entry["user"], stage_name
+def test_all_system_prompts_match_committed_hash():
+    for stage_name, (system_hash, _user_hash) in _COMMITTED_PROMPT_HASHES.items():
+        entry = new_prompts.AGENT_PROMPTS[stage_name]
+        assert _md5(entry["system"]) == system_hash, stage_name
+
+
+def test_all_user_templates_match_committed_hash():
+    for stage_name, (_system_hash, user_hash) in _COMMITTED_PROMPT_HASHES.items():
+        entry = new_prompts.AGENT_PROMPTS[stage_name]
+        assert _md5(entry["user"]) == user_hash, stage_name
 
 
 def test_brainstormer_prompt_formats_with_required_fields():
@@ -39,11 +72,6 @@ def test_brainstormer_prompt_formats_with_required_fields():
         user_goal="Build a CLI todo app",
         tooling_context="uv",
     )
-    legacy_formatted = legacy_prompts.AGENT_PROMPTS["brainstormer"]["user"].format(
-        user_goal="Build a CLI todo app",
-        tooling_context="uv",
-    )
-    assert formatted == legacy_formatted
     assert "Build a CLI todo app" in formatted
 
 
@@ -55,8 +83,8 @@ def test_planner_prompt_formats_with_required_fields():
         selected_approach="Approach 1",
     )
     formatted = new_prompts.AGENT_PROMPTS["planner"]["user"].format(**fields)
-    legacy_formatted = legacy_prompts.AGENT_PROMPTS["planner"]["user"].format(**fields)
-    assert formatted == legacy_formatted
+    assert "Build a CLI todo app" in formatted
+    assert "Approach 1" in formatted
 
 
 def test_executor_prompt_formats_with_required_fields():
@@ -69,8 +97,8 @@ def test_executor_prompt_formats_with_required_fields():
         existing_code="",
     )
     formatted = new_prompts.AGENT_PROMPTS["executor"]["user"].format(**fields)
-    legacy_formatted = legacy_prompts.AGENT_PROMPTS["executor"]["user"].format(**fields)
-    assert formatted == legacy_formatted
+    assert "main.py" in formatted
+    assert "Create the entrypoint" in formatted
 
 
 def test_code_reviewer_prompt_formats_with_required_fields():
@@ -83,10 +111,7 @@ def test_code_reviewer_prompt_formats_with_required_fields():
         file_contents="print()",
     )
     formatted = new_prompts.AGENT_PROMPTS["code_reviewer"]["user"].format(**fields)
-    legacy_formatted = legacy_prompts.AGENT_PROMPTS["code_reviewer"]["user"].format(
-        **fields
-    )
-    assert formatted == legacy_formatted
+    assert "main.py" in formatted
 
 
 def test_fixer_prompt_formats_with_required_fields():
@@ -102,8 +127,7 @@ def test_fixer_prompt_formats_with_required_fields():
         code_snippet="print('x')",
     )
     formatted = new_prompts.AGENT_PROMPTS["fixer"]["user"].format(**fields)
-    legacy_formatted = legacy_prompts.AGENT_PROMPTS["fixer"]["user"].format(**fields)
-    assert formatted == legacy_formatted
+    assert "off by one" in formatted
 
 
 def test_ralph_wiggum_reviewer_prompt_formats_with_required_fields():
@@ -117,10 +141,7 @@ def test_ralph_wiggum_reviewer_prompt_formats_with_required_fields():
     formatted = new_prompts.AGENT_PROMPTS["ralph_wiggum_reviewer"]["user"].format(
         **fields
     )
-    legacy_formatted = legacy_prompts.AGENT_PROMPTS["ralph_wiggum_reviewer"][
-        "user"
-    ].format(**fields)
-    assert formatted == legacy_formatted
+    assert "DONE" in formatted
 
 
 def test_brainstorming_reviewer_prompt_formats_with_required_fields():
@@ -132,7 +153,4 @@ def test_brainstorming_reviewer_prompt_formats_with_required_fields():
     formatted = new_prompts.AGENT_PROMPTS["brainstorming_reviewer"]["user"].format(
         **fields
     )
-    legacy_formatted = legacy_prompts.AGENT_PROMPTS["brainstorming_reviewer"][
-        "user"
-    ].format(**fields)
-    assert formatted == legacy_formatted
+    assert "Approach 1" in formatted
