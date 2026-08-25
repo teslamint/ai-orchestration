@@ -42,8 +42,8 @@ Gemini → Codex → Claude 6단계 워크플로우로, 사용자의 목표를 �
 
 ## 요구 사항
 
-- Python 3.9+
-- `gemini`, `codex`, `claude` CLI가 PATH에 있어야 합니다 (CLI 도구 사용 시)
+- `agy`, `codex`, `claude` CLI가 PATH에 있어야 합니다 (CLI 도구 사용 시; 과거 `gemini`는 `agy`로
+  대체되었습니다)
 - (권장) `uv` 사용 환경
 - (선택) API 직접 호출 시 환경변수 설정:
   - `GOOGLE_AI_API_KEY`: Google AI API 키 (gemini_api)
@@ -166,7 +166,7 @@ uv run python orchestrator_cli.py "Refactor the authentication module" \
 | `--auto-fix` | 리뷰 항목 자동 수정 (확인 없이) | `False` |
 | `--auto-select` | 접근 방식 자동 선택 (기본값 또는 추천) | `False` |
 | `--project-name` | 프로젝트 이름 (생략 시 goal에서 자동 생성) | 자동 생성 |
-| `--brainstormer` | Stage 1 브레인스토밍 도구 (gemini/codex/claude/gemini_api/openai_api/anthropic_api) | `gemini` |
+| `--brainstormer` | Stage 1 브레인스토밍 도구 (agy/codex/claude/gemini_api/openai_api/anthropic_api) | `agy` |
 | `--reviewer` | Stage 2 브레인스토밍 리뷰 도구 | `codex` |
 | `--planner` | Stage 3 계획 수립 도구 | `codex` |
 | `--executor` | Stage 4 코드 실행 도구 | `claude` |
@@ -284,7 +284,7 @@ Fixed: workspace/create_a_fibonacci_calculator/fibonacci.py
 ```
 
 지원 도구 목록:
-- CLI 도구: `gemini`, `codex`, `claude`
+- CLI 도구: `agy`, `codex`, `claude`
 - API 도구: `gemini_api`, `openai_api`, `anthropic_api`
 
 ## Devcontainer (보안 샌드박스)

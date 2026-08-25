@@ -27,7 +27,7 @@
 | `--skip-review` | 코드 리뷰 단계 생략 | False |
 | `--max-fix-iterations` | 리뷰-수정 반복 횟수 | 1 |
 | `--debug` | 디버그 로그 출력 | False |
-| `--brainstormer` | Stage 1 도구 | gemini |
+| `--brainstormer` | Stage 1 도구 | agy |
 | `--reviewer` | Stage 2 도구 | codex |
 | `--planner` | Stage 3 도구 | codex |
 | `--executor` | Stage 4 도구 | claude |
@@ -43,7 +43,7 @@
 ### Available Tool Types
 | Type | Description |
 |------|-------------|
-| `gemini` | Gemini CLI (requires `gemini` in PATH) |
+| `agy` | Antigravity CLI (requires `agy` in PATH) |
 | `codex` | OpenAI Codex CLI (requires `codex` in PATH) |
 | `claude` | Claude CLI (requires `claude` in PATH) |
 | `gemini_api` | Google AI API (requires `GOOGLE_AI_API_KEY` env) |
@@ -141,7 +141,7 @@ uv run python orchestrator_cli.py "<goal>" \
 - PRs should describe the user-facing impact, list commands run, and link related issues
 
 ## Configuration & Runtime Notes
-- CLI-based tools require binaries on PATH: `gemini`, `codex`, `claude`.
+- CLI-based tools require binaries on PATH: `agy`, `codex`, `claude`.
 - API-based tools require environment variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_AI_API_KEY`.
 - Default workspace is `./workspace`; each project gets isolated subdirectory.
 - Generated files stay inside `workspace/<project_name>/` unless explicitly requested.
