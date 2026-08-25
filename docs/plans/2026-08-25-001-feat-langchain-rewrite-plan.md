@@ -171,6 +171,7 @@ Test scenarios:
   happy: config file loads a stage object with `model`, `fallback_model`, and `fallback_binary`;
   bare stage string loads as `{"model": value}`.
   edge: CLI stage flag overrides config, config overrides built-in defaults, absolute workspace
+  paths remain absolute, and missing optional fallback model remains `None`.
   error: invalid proxy slot, invalid binary slot, malformed config, and unknown stage fail with
   stage-specific diagnostics; catalog status is accepted through the injectable boundary without
   making a network call.
