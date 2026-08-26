@@ -88,6 +88,12 @@ def test_parse_approach_options_rejects_placeholder_bold_bullet_title():
     assert options == []
 
 
+def test_parse_approach_options_rejects_placeholder_bullet_with_detail_suffix():
+    options = parse_approach_options("- **Approach 1: [Name]**: details")
+
+    assert options == []
+
+
 # --- CommandExecutor: retries=1 -> two total attempts -----------------------
 
 

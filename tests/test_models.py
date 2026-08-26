@@ -156,6 +156,18 @@ def test_context_rejects_task_path_outside_workspace(tmp_path):
         context.resolve_workspace_file(Path("../escape.py"))
 
 
+def test_context_rejects_workspace_root_as_file_target(tmp_path):
+    import pytest
+
+    from ai_orchestration.errors import StateError
+
+    context = OrchestrationContext(
+        project_name="test", user_goal="test", workspace_path=tmp_path
+    )
+    with pytest.raises(StateError, match="file target"):
+        context.resolve_workspace_file(Path("."))
+
+
 def test_task_creation():
     task = Task(
         step_id=1,

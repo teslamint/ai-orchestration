@@ -83,8 +83,8 @@ def parse_approach_options(text: str) -> list[str]:
 
     if not options:
         for line in lines:
-            normalized = line.removeprefix("- **").removesuffix("**")
-            title = normalized.rsplit(":", 1)[-1]
+            normalized = line.removeprefix("- **").split("**", 1)[0]
+            title = normalized.split(":", 1)[-1]
             stripped_title = _PLACEHOLDER_PATTERN.sub("", title).strip()
             if (
                 line.startswith("- **")

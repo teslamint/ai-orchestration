@@ -269,9 +269,11 @@ class OrchestrationContext(BaseModel):
         """Resolve a model-supplied file path only within this workspace."""
         candidate = (self.workspace_path / path).resolve()
         try:
-            candidate.relative_to(self.workspace_path)
+            relative_path = candidate.relative_to(self.workspace_path)
         except ValueError as exc:
             raise StateError(f"file path {path!s} is outside workspace") from exc
+        if relative_path == Path("."):
+            raise StateError(f"file path {path!s} must name a file target")
         return candidate
 
     # === Ralph Wiggum Feedback Loop Methods ===
