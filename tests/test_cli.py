@@ -73,6 +73,72 @@ def _fake_cli_factory(binary):
     return _FakeProvider(binary)
 
 
+def test_fixer_extracts_fenced_code_before_writing(tmp_path, monkeypatch):
+    from ai_orchestration.config import StageConfig
+    from ai_orchestration.models.context import (
+        CodeReviewItem,
+        OrchestrationContext,
+        ReviewItemType,
+        ReviewSeverity,
+    )
+
+    context = OrchestrationContext(
+        project_name="fixer_test", user_goal="fix", workspace_path=tmp_path
+    )
+    item = CodeReviewItem(
+        item_id=1,
+        file_path="fixed.py",
+        review_type=ReviewItemType.BUG,
+        severity=ReviewSeverity.HIGH,
+        description="broken",
+        suggestion="fix it",
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_complete_stage_text",
+        lambda *_args, **_kwargs: "```python\nvalue = 1\n```",
+    )
+
+    cli_module._run_fixer(context, StageConfig(model="codex"), item)
+    assert (tmp_path / "fixed.py").read_text() == "value = 1"
+
+
+def test_command_logs_are_created_inside_project_workspace(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _install_reachable_catalog(monkeypatch)
+    from ai_orchestration.models.context import ActionType, Task
+
+    def plan_command(context, *_args, **_kwargs):
+        context.implementation_plan = [
+            Task(
+                step_id=1,
+                file_path=".",
+                action_type=ActionType.RUN_COMMAND,
+                instruction="echo logged",
+            )
+        ]
+
+    monkeypatch.setattr(cli_module, "_run_planner", plan_command)
+
+    result = runner.invoke(
+        app,
+        [
+            "run a command",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "command_logs",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--skip-review",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert list((tmp_path / "command_logs" / "execution_logs").glob("*.json"))
+
+
 def _install_fakes(monkeypatch):
     monkeypatch.setattr(cli_module, "_http_provider_factory", _fake_http_factory)
     monkeypatch.setattr(cli_module, "_cli_provider_factory", _fake_cli_factory)

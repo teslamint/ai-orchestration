@@ -5,7 +5,8 @@ the legacy CLI's `main()`: it recognizes `### Approach N: Title` / bullet
 headings, strips template placeholders (`[Name]`), and deduplicates. Six
 stages remain strictly sequential (§Interface: stage roles unchanged).
 `CommandExecutor` ports the committed retry/audit-log behavior verbatim,
-including the `retries=1` default (two total attempts).
+including the `retries=1` default (two total attempts), plus a configurable,
+finite subprocess timeout (§Failure classes: "exceeds the stage timeout").
 """
 
 from __future__ import annotations
@@ -20,7 +21,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ai_orchestration.errors import StateError
 from ai_orchestration.utils.slug import generate_command_slug
+
+# A hung shell command must not stall a run indefinitely. Matches the
+# CLI-provider default (`providers/cli.py:DEFAULT_CLI_TIMEOUT_SECONDS`).
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 300.0
 
 STAGE_ORDER: tuple[str, ...] = (
     "brainstormer",
@@ -124,11 +130,15 @@ class CommandExecutor:
 
     Ported verbatim from `orchestrator_cli.py`'s `CommandExecutor`:
     `retries=1` means two total attempts (`1 + retries`), both recorded in
-    the JSON audit log.
+    the JSON audit log. `timeout` bounds each attempt's `subprocess.run`
+    call so a hung command cannot stall the run indefinitely; a
+    `subprocess.TimeoutExpired` is recorded as a failed attempt like any
+    other command-execution error.
     """
 
     auto_approve: bool = False
     retries: int = 1
+    timeout: Optional[float] = DEFAULT_COMMAND_TIMEOUT_SECONDS
     log_directory: Path = field(default_factory=lambda: Path("execution_logs"))
     _execution_counter: int = field(default=0, init=False)
 
@@ -205,6 +215,7 @@ class CommandExecutor:
                     text=True,
                     encoding="utf-8",
                     cwd=cwd,
+                    timeout=self.timeout,
                 )
                 duration_ms = int((time.monotonic() - start_time) * 1000)
                 log_entry = CommandExecutionLog(
@@ -238,6 +249,31 @@ class CommandExecutor:
                     f"Command failed with exit code {result.returncode}: "
                     f"{result.stderr}"
                 )
+            except subprocess.TimeoutExpired:
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                log_entry = CommandExecutionLog(
+                    timestamp=timestamp,
+                    command=command,
+                    cwd=cwd,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=f"Command timed out after {self.timeout}s",
+                    duration_ms=duration_ms,
+                    attempt=attempt + 1,
+                )
+                logs.append(log_entry)
+                attempts_data.append(
+                    {
+                        "timestamp": log_entry.timestamp,
+                        "attempt": log_entry.attempt,
+                        "exit_code": log_entry.exit_code,
+                        "stdout": log_entry.stdout,
+                        "stderr": log_entry.stderr,
+                        "duration_ms": log_entry.duration_ms,
+                    }
+                )
+                final_exit_code = -1
+                final_output = f"Command timed out after {self.timeout}s"
             except Exception as exc:
                 duration_ms = int((time.monotonic() - start_time) * 1000)
                 log_entry = CommandExecutionLog(
@@ -309,6 +345,11 @@ def run_pipeline(
     not re-run (resume, S3). When `start_stage` is None the pipeline runs
     from the beginning. `skip_review` omits `code_reviewer` and `fixer`
     (`--skip-review`), matching the legacy CLI's Stage 5-6 gate.
+
+    Raises `StateError` if `start_stage` is not a valid stage name, or is
+    a stage excluded from the active order by `skip_review` (e.g. resuming
+    at "code_reviewer" while `--skip-review` is set) -- an unavailable
+    resume point must fail loudly, not silently start from the wrong index.
     """
     order = STAGE_ORDER
     if skip_review:
@@ -317,7 +358,13 @@ def run_pipeline(
     if start_stage is None:
         start_index = 0
     else:
-        start_index = order.index(start_stage)
+        try:
+            start_index = order.index(start_stage)
+        except ValueError as exc:
+            raise StateError(
+                f"start_stage {start_stage!r} is not available in the "
+                f"current pipeline order {order!r}"
+            ) from exc
 
     for stage_name in order[start_index:]:
         if stage_name in completed_stages:

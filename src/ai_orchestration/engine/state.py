@@ -23,6 +23,7 @@ crashes or is killed, so a stale lock can never wedge future runs.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import os
@@ -218,9 +219,11 @@ def acquire_run_lock(path: Path) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             os.close(fd)
-            raise RunLockedError(
-                f"another run already holds the lock for {path}"
-            ) from exc
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise RunLockedError(
+                    f"another run already holds the lock for {path}"
+                ) from exc
+            raise StateError(f"failed to acquire run lock for {path}: {exc}") from exc
         try:
             fd_stat = os.fstat(fd)
             dir_stat = os.stat(lock_dir)

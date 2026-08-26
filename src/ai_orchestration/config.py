@@ -233,7 +233,10 @@ class ProviderConfig:
 
     @classmethod
     def from_raw(cls, raw: Optional[Mapping[str, object]]) -> "ProviderConfig":
-        raw = raw or {}
+        if raw is None:
+            raw = {}
+        elif not isinstance(raw, Mapping):
+            raise ConfigError("provider config must be an object")
         if "base_url" in raw:
             base_url = raw["base_url"]
             if not isinstance(base_url, str):

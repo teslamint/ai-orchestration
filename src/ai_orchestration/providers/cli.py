@@ -26,7 +26,12 @@ from typing import Callable, Optional
 
 from pydantic import BaseModel, ValidationError
 
-from ai_orchestration.providers.base import CLIProviderError, ToolType
+from ai_orchestration.errors import ConfigError
+from ai_orchestration.providers.base import (
+    CLIProviderError,
+    ToolType,
+    flatten_json_schema,
+)
 from ai_orchestration.utils.extract import extract_code_content, extract_json_object
 from ai_orchestration.utils.subprocess_diag import truncate_stderr as _truncate_stderr
 
@@ -320,7 +325,7 @@ class AgyProvider(BaseCLIProvider):
         the same runner `BaseCLIProvider.complete` uses -- this is not a
         text-completion call so it cannot simply delegate to `complete()`.
         """
-        flat_schema = schema.model_json_schema()
+        flat_schema = flatten_json_schema(schema.model_json_schema())
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False
         ) as handle:
@@ -473,16 +478,19 @@ def load_tool_config(
     config = LLMToolConfig()
 
     if config_file and config_file.exists():
-        with open(config_file) as f:
-            data = json.load(f)
-        config = LLMToolConfig(
-            brainstormer=ToolType(data.get("brainstormer", "agy")),
-            reviewer=ToolType(data.get("reviewer", "codex")),
-            planner=ToolType(data.get("planner", "codex")),
-            executor=ToolType(data.get("executor", "claude")),
-            code_reviewer=ToolType(data.get("code_reviewer", "codex")),
-            fixer=ToolType(data.get("fixer", "claude")),
-        )
+        try:
+            with open(config_file) as f:
+                data = json.load(f)
+            config = LLMToolConfig(
+                brainstormer=ToolType(data.get("brainstormer", "agy")),
+                reviewer=ToolType(data.get("reviewer", "codex")),
+                planner=ToolType(data.get("planner", "codex")),
+                executor=ToolType(data.get("executor", "claude")),
+                code_reviewer=ToolType(data.get("code_reviewer", "codex")),
+                fixer=ToolType(data.get("fixer", "claude")),
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ConfigError(f"tool config '{config_file}' is invalid") from exc
 
     if brainstormer:
         config.brainstormer = ToolType(brainstormer)

@@ -114,6 +114,8 @@ class HttpProvider:
             raise ModelFaultError(
                 f"{self.model}: malformed JSON response body ({exc})"
             ) from exc
+        if not response.choices:
+            raise ModelFaultError(f"{self.model}: response contained empty choices")
         return response.choices[0].message.content or ""
 
     def complete_structured(
@@ -148,6 +150,8 @@ class HttpProvider:
                 f"{self.model}: malformed JSON response body ({exc})"
             ) from exc
 
+        if not response.choices:
+            raise ModelFaultError(f"{self.model}: response contained empty choices")
         text = response.choices[0].message.content or ""
         payload = extract_json_object(text)
         if payload is not None:

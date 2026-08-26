@@ -1,11 +1,10 @@
-"""Characterization tests for ported prompt templates (U2/U6).
+"""Prompt-template contracts for the orchestration stages.
 
-Prompt text is unchanged from the committed `agent_prompts.py` at `8ee3c4c`
-(§Scope/Out: "Changing prompt wording" is out of scope). U2 verified this by
-live byte comparison against the legacy module while it still existed; U6
-deletes that module (clean cutover), so this suite pins the MD5 hashes
-captured at that comparison instead of re-importing a file that no longer
-exists.
+Most templates are preserved byte-for-byte from committed `agent_prompts.py`
+at `8ee3c4c`. U6 deletes that module, so hashes pin those templates without
+re-importing the deleted module. The planner's Repository Notes intentionally
+refer to the replacement extraction module and helpers, and its hash captures
+that corrected contract.
 """
 
 import hashlib
@@ -26,7 +25,7 @@ _COMMITTED_PROMPT_HASHES = {
     ),
     "planner": (
         "d19246bbac859a971777da6565c3570d",
-        "4c30acb6969f3fdf4125fdbb9595039e",
+        "20dae7e86d59211804305ea541b486c3",
     ),
     "executor": (
         "87acfa330509b04f03ef6a2fa7063ba7",

@@ -243,6 +243,12 @@ def test_provider_config_malformed_base_url_raises_config_error():
         ProviderConfig.from_raw({"base_url": 5})
 
 
+@pytest.mark.parametrize("raw", ["not-a-mapping", ["not", "a", "mapping"], 1])
+def test_provider_config_non_mapping_raises_config_error(raw):
+    with pytest.raises(ConfigError, match="provider config"):
+        ProviderConfig.from_raw(raw)
+
+
 # --- resolve_workspace_base precedence ----------------------------------------
 
 

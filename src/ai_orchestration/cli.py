@@ -66,7 +66,7 @@ from ai_orchestration.providers.routing import (
     complete_structured_with_fallback,
     complete_with_fallback,
 )
-from ai_orchestration.utils.extract import extract_json_list
+from ai_orchestration.utils.extract import extract_code_content, extract_json_list
 from ai_orchestration.utils.slug import generate_project_name
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
@@ -428,7 +428,9 @@ def _run_fixer(
         line_range=f"{item.line_start}-{item.line_end}",
         code_snippet=item.code_snippet or "",
     )
-    output = _complete_stage_text("fixer", stage, prompt, **d)
+    output = extract_code_content(_complete_stage_text("fixer", stage, prompt, **d))
+    if not output:
+        return
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(output, encoding="utf-8")
 
@@ -761,7 +763,7 @@ def _run(
     command_executor = CommandExecutor(
         auto_approve=config.auto_approve,
         retries=1,
-        log_directory=Path("execution_logs"),
+        log_directory=config.workspace_path / "execution_logs",
     )
     command_gate = ApprovalGate(is_tty=_is_tty(), ask=_confirm_interactively)
     stage_kwargs = dict(debug=config.debug, debug_log_path=config.debug_log_path)

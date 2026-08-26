@@ -5,6 +5,7 @@ completed stages) and the mutation matrix's "stage completion checkpoint"
 and "run init" transitions.
 """
 
+import errno
 import json
 import os
 
@@ -388,3 +389,40 @@ def test_acquire_run_lock_survives_state_directory_recreation(tmp_path):
         with pytest.raises(RunLockedError):
             with acquire_run_lock(path):
                 pass
+
+
+# --- acquire_run_lock: errno classification (CodeRabbit finding) -----------
+
+
+def test_acquire_run_lock_wraps_non_lock_oserror_as_state_error_and_closes_fd(
+    tmp_path, monkeypatch
+):
+    """Only EAGAIN/EWOULDBLOCK from flock means "another run holds the
+    lock". Any other OSError (e.g. EBADF/EIO) is a different failure mode
+    and must surface as a generic StateError, not be misreported as
+    RunLockedError -- while still closing the fd (no leak).
+    """
+    import fcntl
+
+    from ai_orchestration.engine.state import RunLockedError, StateError
+    from ai_orchestration.engine.state import acquire_run_lock as _acquire_run_lock
+
+    closed_fds = []
+    real_close = os.close
+
+    def _tracking_close(fd):
+        closed_fds.append(fd)
+        return real_close(fd)
+
+    def _raise_eio(fd, operation):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(fcntl, "flock", _raise_eio)
+    monkeypatch.setattr(os, "close", _tracking_close)
+
+    path = tmp_path / "run_state.json"
+    with pytest.raises(StateError) as excinfo:
+        with _acquire_run_lock(path):
+            pass  # pragma: no cover - must not be reached
+    assert not isinstance(excinfo.value, RunLockedError)
+    assert len(closed_fds) == 1

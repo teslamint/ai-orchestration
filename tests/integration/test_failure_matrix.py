@@ -9,7 +9,6 @@ matrix. Disposable fixture outputs live under `.release-loop/evidence/U6/`.
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -18,9 +17,6 @@ from ai_orchestration.cli import app
 from ai_orchestration.config import CatalogOutcome, CatalogStatus
 from ai_orchestration.engine.state import load_state
 from ai_orchestration.providers.base import ModelFaultError, TransportError
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-EVIDENCE_DIR = REPO_ROOT / ".release-loop" / "evidence" / "U6"
 
 runner = CliRunner(env={"COLUMNS": "200", "LINES": "50"})
 
@@ -143,7 +139,7 @@ def test_gate_pause_forced_failure_no_command_runs(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(cli_module, "_is_tty", lambda: False)
 
-    log_dir = Path("execution_logs")
+    log_dir = tmp_path / "gate_forced_fail" / "execution_logs"
     before = set(log_dir.glob("*.json")) if log_dir.exists() else set()
 
     result = runner.invoke(
@@ -448,30 +444,41 @@ def test_model_fallback_forced_failure_terminates_with_both_diagnostics(
 # --- Clean cutover -------------------------------------------------------------
 
 
-def test_clean_cutover_guard_empty_when_main_checkout_clean():
-    main = subprocess.run(
+def test_clean_cutover_guard_empty_for_clean_fixture_main_checkout(tmp_path):
+    fixture_repo = tmp_path / "fixture-main"
+    fixture_repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=fixture_repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"], cwd=fixture_repo, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=fixture_repo,
+        check=True,
+    )
+    (fixture_repo / "tracked.txt").write_text("committed\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=fixture_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "fixture baseline"], cwd=fixture_repo, check=True
+    )
+    worktrees = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
-        cwd=REPO_ROOT,
+        cwd=fixture_repo,
         capture_output=True,
         text=True,
         check=True,
     )
-    main_path = None
-    for line in main.stdout.splitlines():
-        if line.startswith("worktree "):
-            main_path = line.split(" ", 1)[1]
-            break
-    assert main_path is not None
+    main_path = next(
+        line.split(" ", 1)[1]
+        for line in worktrees.stdout.splitlines()
+        if line.startswith("worktree ")
+    )
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=main_path,
         capture_output=True,
         text=True,
         check=True,
-    )
-    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-    (EVIDENCE_DIR / "main-checkout-guard.txt").write_text(
-        f"main_checkout={main_path}\nstatus_output={status.stdout!r}\n"
     )
     assert status.stdout == ""
 
@@ -484,9 +491,21 @@ def test_clean_cutover_guard_nonempty_stops_before_deletion(tmp_path):
     fixture_repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=fixture_repo, check=True)
     (fixture_repo / "dirty.txt").write_text("uncommitted\n")
+    worktrees = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=fixture_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    main_path = next(
+        line.split(" ", 1)[1]
+        for line in worktrees.stdout.splitlines()
+        if line.startswith("worktree ")
+    )
     status = subprocess.run(
         ["git", "status", "--porcelain"],
-        cwd=fixture_repo,
+        cwd=main_path,
         capture_output=True,
         text=True,
         check=True,

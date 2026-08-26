@@ -24,9 +24,12 @@ def extract_json_list(text: str) -> list[dict[str, Any]]:
     empty list when nothing qualifies (the legacy empty result).
     """
     try:
-        return json.loads(text)
-    except Exception:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
         pass
+    else:
+        if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
+            return parsed
     decoder = json.JSONDecoder()
     candidates: list[list[dict[str, Any]]] = []
     idx = 0

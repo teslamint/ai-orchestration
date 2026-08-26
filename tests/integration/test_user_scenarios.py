@@ -377,7 +377,7 @@ def test_proxy_unreachable_missing_fallback_binary_fails_naming_it(
     def which_all_but_agy(name):
         if name == "agy":
             return None
-        return real_which(name) or f"/usr/bin/{name}"
+        return real_which(name)
 
     monkeypatch.setattr(shutil, "which", which_all_but_agy)
     monkeypatch.setattr(cli_module, "_http_provider_factory", _AlwaysDownHttp)

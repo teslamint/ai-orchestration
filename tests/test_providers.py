@@ -28,6 +28,11 @@ from ai_orchestration.providers.cli import (
     validate_tool_config,
 )
 
+
+class _SimpleSchema(BaseModel):
+    value: str
+
+
 # --- ToolType / StageRole (legacy-compatible enum surface) -----------------
 
 
@@ -52,6 +57,24 @@ def test_tool_type_gemini_no_longer_selects_a_cli_provider():
     # error: A12 removes gemini; the historical enum value must not resolve.
     with pytest.raises(ValueError):
         ToolType("gemini")
+
+
+def test_load_tool_config_malformed_file_raises_config_error(tmp_path):
+    from ai_orchestration.errors import ConfigError
+
+    path = tmp_path / "tools.json"
+    path.write_text("{invalid")
+    with pytest.raises(ConfigError, match="tool config"):
+        load_tool_config(path)
+
+
+def test_load_tool_config_unknown_file_tool_raises_config_error(tmp_path):
+    from ai_orchestration.errors import ConfigError
+
+    path = tmp_path / "tools.json"
+    path.write_text('{"planner": "unknown"}')
+    with pytest.raises(ConfigError, match="tool config"):
+        load_tool_config(path)
 
 
 def test_stage_role_values():
@@ -83,6 +106,34 @@ def test_provider_result_carries_content_and_provider_name():
     assert result.content == "hi"
     assert result.provider_name == "agy"
     assert result.used_structured_path is False
+
+
+def test_extract_json_list_rejects_direct_non_list_of_objects():
+    from ai_orchestration.utils.extract import extract_json_list
+
+    assert extract_json_list('{"tasks": []}') == []
+    assert extract_json_list("[1, 2]") == []
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_http_provider_empty_choices_raises_model_fault(structured):
+    from ai_orchestration.providers.http import HttpProvider
+
+    class _Completions:
+        @staticmethod
+        def create(**_kwargs):
+            return type("Response", (), {"choices": []})()
+
+    provider = HttpProvider(model="test", base_url="http://stub/v1", api_key="key")
+    provider._client = type(
+        "Client", (), {"chat": type("Chat", (), {"completions": _Completions()})()}
+    )()
+
+    with pytest.raises(ModelFaultError, match="empty choices"):
+        if structured:
+            provider.complete_structured("prompt", schema=_SimpleSchema)
+        else:
+            provider.complete("prompt")
 
 
 # --- flatten_json_schema -----------------------------------------------------
@@ -407,6 +458,33 @@ def test_agy_provider_complete_structured_uses_native_structured_output(
     )
     result = provider.complete_structured("build a plan", schema=_Plan)
     assert result == _Plan(step_id=1, name="alpha")
+
+
+def test_agy_provider_writes_flattened_structured_schema(monkeypatch):
+    import ai_orchestration.providers.cli as cli_module
+
+    captured = {}
+    provider = AgyProvider()
+    monkeypatch.setattr(
+        provider, "build_structured_command", lambda _prompt, _path: ["true"]
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_run_cli_subprocess",
+        lambda *_args, **_kwargs: '{"structured_output": {"items": [{"value": 1}]}}',
+    )
+    real_dump = cli_module.json.dump
+
+    def capture_dump(value, handle):
+        captured["schema"] = value
+        return real_dump(value, handle)
+
+    monkeypatch.setattr(cli_module.json, "dump", capture_dump)
+
+    provider.complete_structured("plan", schema=_Outer)
+
+    assert "$defs" not in captured["schema"]
+    assert "$ref" not in str(captured["schema"])
 
 
 def test_agy_provider_complete_structured_falls_back_to_extraction(

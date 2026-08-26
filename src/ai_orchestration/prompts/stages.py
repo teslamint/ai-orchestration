@@ -114,7 +114,7 @@ CHATGPT_USER_PROMPT_TEMPLATE = """
 {tooling_context}
 
 **Repository Notes:**
-- Helper functions `_extract_json_list` and `_extract_code_content` live in `orchestrator_cli.py`.
+- Helpers `extract_json_list` and `extract_code_content` live in `ai_orchestration.utils.extract`.
 
 **Brainstormed Approaches:**
 {brainstorming_ideas}

@@ -7,11 +7,14 @@ Covers the behavior-preservation inventory rows for approach option parsing
 
 import json
 
+import pytest
+
 from ai_orchestration.engine.stages import (
     STAGE_ORDER,
     CommandExecutor,
     parse_approach_options,
 )
+from ai_orchestration.errors import StateError
 
 # --- Six-stage order ---------------------------------------------------------
 
@@ -224,3 +227,78 @@ def test_run_pipeline_skip_review_omits_code_reviewer_and_fixer():
     assert order == ["brainstormer", "brainstorming_reviewer", "planner", "executor"]
     assert "code_reviewer" not in completed
     assert "fixer" not in completed
+
+
+# --- run_pipeline: unavailable start_stage (CodeRabbit finding) -------------
+
+
+def test_run_pipeline_unknown_start_stage_raises_state_error():
+    from ai_orchestration.engine.stages import run_pipeline
+
+    handlers = {name: (lambda: None) for name in STAGE_ORDER}
+    with pytest.raises(StateError):
+        run_pipeline(
+            handlers=handlers, completed_stages=[], start_stage="not_a_real_stage"
+        )
+
+
+def test_run_pipeline_start_stage_excluded_by_skip_review_raises_state_error():
+    # "code_reviewer" is a real stage name, but skip_review removes it from
+    # the active order, so resuming at it is unavailable, not silently
+    # resolvable to some other index.
+    from ai_orchestration.engine.stages import run_pipeline
+
+    handlers = {name: (lambda: None) for name in STAGE_ORDER}
+    with pytest.raises(StateError):
+        run_pipeline(
+            handlers=handlers,
+            completed_stages=[],
+            start_stage="code_reviewer",
+            skip_review=True,
+        )
+
+
+# --- CommandExecutor: finite subprocess timeout (CodeRabbit finding) --------
+
+
+def test_command_executor_has_finite_default_timeout(tmp_path):
+    executor = CommandExecutor(auto_approve=True, log_directory=tmp_path)
+    assert executor.timeout is not None
+    assert executor.timeout > 0
+
+
+def test_command_executor_timeout_expired_records_failed_attempt(tmp_path, monkeypatch):
+    import subprocess
+
+    import ai_orchestration.engine.stages as stages_module
+
+    def _raise_timeout(command_args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=command_args, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(stages_module.subprocess, "run", _raise_timeout)
+    executor = CommandExecutor(
+        auto_approve=True, log_directory=tmp_path, retries=0, timeout=5
+    )
+    success, output, logs = executor.run("sleep 100")
+    assert success is False
+    assert len(logs) == 1
+    assert logs[0].exit_code == -1
+    assert "timed out" in logs[0].stderr.lower()
+
+
+def test_command_executor_passes_configured_timeout_to_subprocess_run(
+    tmp_path, monkeypatch
+):
+    import ai_orchestration.engine.stages as stages_module
+
+    captured = {}
+    real_run = stages_module.subprocess.run
+
+    def _capturing_run(command_args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return real_run(command_args, **kwargs)
+
+    monkeypatch.setattr(stages_module.subprocess, "run", _capturing_run)
+    executor = CommandExecutor(auto_approve=True, log_directory=tmp_path, timeout=42)
+    executor.run("echo hi")
+    assert captured["timeout"] == 42
