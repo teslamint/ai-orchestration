@@ -818,3 +818,22 @@ def test_run_cli_subprocess_preserves_output_across_read_chunks():
         )
         == "abcdef"
     )
+
+
+def test_run_cli_subprocess_preserves_utf8_across_read_chunks():
+    import sys
+
+    from ai_orchestration.providers.cli import _run_cli_subprocess
+
+    script = (
+        "import os, time\n"
+        "os.write(1, b'\\xed')\n"
+        "time.sleep(0.1)\n"
+        "os.write(1, b'\\x95\\x9c\\n')\n"
+    )
+    assert (
+        _run_cli_subprocess(
+            [sys.executable, "-c", script], binary_name="python", timeout=1
+        )
+        == "한"
+    )

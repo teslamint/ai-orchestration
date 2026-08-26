@@ -11,6 +11,7 @@ preserved byte-for-byte as a non-fatal warning API.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import selectors
@@ -117,6 +118,10 @@ def _run_cli_subprocess(
     stderr_chunks: list[str] = []
     parsed_chunks: list[str] = []
     stdout_buffer = ""
+    stream_decoders = {
+        "stdout": codecs.getincrementaldecoder("utf-8")(errors="replace"),
+        "stderr": codecs.getincrementaldecoder("utf-8")(errors="replace"),
+    }
     sel = selectors.DefaultSelector()
     sel.register(process.stdout, selectors.EVENT_READ, "stdout")
     sel.register(process.stderr, selectors.EVENT_READ, "stderr")
@@ -159,19 +164,30 @@ def _run_cli_subprocess(
             continue
         for key, _ in events:
             stream = key.fileobj
-            chunk = os.read(stream.fileno(), 65536).decode("utf-8", errors="replace")
-            if chunk == "":
-                if parse_stream_json and key.data == "stdout" and stdout_buffer:
+            raw_chunk = os.read(stream.fileno(), 65536)
+            stream_name = key.data
+            text_chunk = stream_decoders[stream_name].decode(
+                raw_chunk, final=not raw_chunk
+            )
+            if not raw_chunk:
+                if text_chunk:
+                    if stream_name == "stderr":
+                        stderr_chunks.append(text_chunk)
+                    else:
+                        merged_output.append(text_chunk)
+                        if parse_stream_json:
+                            stdout_buffer += text_chunk
+                if parse_stream_json and stream_name == "stdout" and stdout_buffer:
                     parsed_chunks.extend(_extract_stream_json_text(stdout_buffer))
                 sel.unregister(stream)
                 continue
-            if key.data == "stderr":
-                stderr_chunks.append(chunk)
+            if stream_name == "stderr":
+                stderr_chunks.append(text_chunk)
                 continue
-            merged_output.append(chunk)
+            merged_output.append(text_chunk)
             last_output = time.monotonic()
             if parse_stream_json:
-                stdout_buffer += chunk
+                stdout_buffer += text_chunk
                 lines = stdout_buffer.splitlines(keepends=True)
                 stdout_buffer = ""
                 if lines and not lines[-1].endswith(("\n", "\r")):
