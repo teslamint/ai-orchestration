@@ -83,10 +83,16 @@ def parse_approach_options(text: str) -> list[str]:
 
     if not options:
         for line in lines:
-            if line.startswith("- **") and line not in seen:
-                seen.add(line)
+            normalized = line.removeprefix("- **").removesuffix("**")
+            title = normalized.rsplit(":", 1)[-1]
+            stripped_title = _PLACEHOLDER_PATTERN.sub("", title).strip()
+            if (
+                line.startswith("- **")
+                and normalized not in seen
+                and bool(_HAS_REAL_CONTENT.search(stripped_title))
+            ):
+                seen.add(normalized)
                 options.append(line)
-
     return options
 
 

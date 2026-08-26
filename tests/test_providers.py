@@ -403,6 +403,24 @@ def test_cli_provider_spawn_failure_raises_cli_provider_error(tmp_path, monkeypa
         provider.complete("hello")
 
 
+def test_cli_provider_prepends_system_prompt_to_user_prompt(monkeypatch):
+    import ai_orchestration.providers.cli as cli_module
+
+    captured = {}
+    provider = CodexProvider()
+    monkeypatch.setattr(
+        provider,
+        "build_command",
+        lambda prompt, debug=False: captured.setdefault("prompt", prompt) or ["true"],
+    )
+    monkeypatch.setattr(
+        cli_module, "_run_cli_subprocess", lambda *_args, **_kwargs: "ok"
+    )
+
+    assert provider.complete("user prompt", system="system prompt") == "ok"
+    assert captured["prompt"] == "system prompt\n\nuser prompt"
+
+
 def test_cli_provider_timeout_raises_cli_provider_error(monkeypatch):
     import sys
 

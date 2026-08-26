@@ -50,7 +50,7 @@ def run_executor_self_healing(
     `max_retries` additional attempts before giving up. Non-Python files
     skip the syntax check entirely.
     """
-    target_path = context.workspace_path / task.file_path
+    target_path = context.resolve_workspace_file(task.file_path)
     existing_code = ""
     if target_path.exists():
         try:
@@ -84,7 +84,7 @@ def run_executor_self_healing(
                 return ExecutorResult(success=False, task=task)
 
         if task.action_type in (ActionType.CREATE_FILE, ActionType.EDIT_FILE):
-            full_path = context.workspace_path / task.file_path
+            full_path = context.resolve_workspace_file(task.file_path)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(code_content, encoding="utf-8")
             diff = generate_diff(existing_code, code_content, str(task.file_path))

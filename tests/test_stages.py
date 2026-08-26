@@ -82,6 +82,12 @@ def test_parse_approach_options_korean_heading_variant():
     assert len(options) == 1
 
 
+def test_parse_approach_options_rejects_placeholder_bold_bullet_title():
+    options = parse_approach_options("- **Approach 1: [Name of Approach]**")
+
+    assert options == []
+
+
 # --- CommandExecutor: retries=1 -> two total attempts -----------------------
 
 

@@ -240,6 +240,7 @@ def _complete_stage_structured(
         schema=schema,
         http_provider_factory=_http_provider_factory,
         cli_provider_factory=_cli_provider_factory,
+        system=AGENT_PROMPTS[stage_name].get("system", ""),
     )
     _write_debug_log(
         debug, debug_log_path, f"{stage_name} structured output", repr(result)
@@ -339,7 +340,7 @@ def _read_existing_code(context: OrchestrationContext, task: Task) -> str:
     (legacy behavior); `CREATE_FILE` tasks on a not-yet-existing path
     correctly see an empty string.
     """
-    target_path = context.workspace_path / task.file_path
+    target_path = context.resolve_workspace_file(task.file_path)
     if not target_path.exists():
         return ""
     try:
@@ -413,7 +414,7 @@ def _run_code_reviewer(context: OrchestrationContext, stage: StageConfig, **d) -
 def _run_fixer(
     context: OrchestrationContext, stage: StageConfig, item: CodeReviewItem, **d
 ) -> None:
-    target_path = context.workspace_path / item.file_path
+    target_path = context.resolve_workspace_file(item.file_path)
     current_code = (
         target_path.read_text(encoding="utf-8") if target_path.exists() else ""
     )

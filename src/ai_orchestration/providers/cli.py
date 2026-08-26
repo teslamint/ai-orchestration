@@ -259,6 +259,8 @@ class BaseCLIProvider:
         that format back into plain text; timeout/descendant cleanup never
         depends on it.
         """
+        if system:
+            prompt = f"{system}\n\n{prompt}"
         cmd = self.build_command(prompt, debug=debug)
         return _run_cli_subprocess(
             cmd,
@@ -269,10 +271,15 @@ class BaseCLIProvider:
         )
 
     def complete_structured(
-        self, prompt: str, *, schema: type[BaseModel], debug: bool = False
+        self,
+        prompt: str,
+        *,
+        schema: type[BaseModel],
+        system: Optional[str] = None,
+        debug: bool = False,
     ) -> BaseModel:
         """Extract-only structured completion (Codex/Claude, decision 3)."""
-        text = self.complete(prompt, debug=debug)
+        text = self.complete(prompt, system=system, debug=debug)
         content = extract_code_content(text)
         payload = extract_json_object(content) or extract_json_object(text)
         if payload is None:
@@ -312,6 +319,7 @@ class AgyProvider(BaseCLIProvider):
         prompt: str,
         *,
         schema: type[BaseModel],
+        system: Optional[str] = None,
         debug: bool = False,
         timeout: Optional[float] = DEFAULT_CLI_TIMEOUT_SECONDS,
     ) -> BaseModel:
@@ -325,6 +333,8 @@ class AgyProvider(BaseCLIProvider):
         the same runner `BaseCLIProvider.complete` uses -- this is not a
         text-completion call so it cannot simply delegate to `complete()`.
         """
+        if system:
+            prompt = f"{system}\n\n{prompt}"
         flat_schema = flatten_json_schema(schema.model_json_schema())
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False

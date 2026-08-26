@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ai_orchestration.errors import StateError
+
 
 class ActionType(str, Enum):
     """
@@ -262,6 +264,15 @@ class OrchestrationContext(BaseModel):
         resolved_path = v.resolve()
         resolved_path.mkdir(parents=True, exist_ok=True)
         return resolved_path
+
+    def resolve_workspace_file(self, path: Path) -> Path:
+        """Resolve a model-supplied file path only within this workspace."""
+        candidate = (self.workspace_path / path).resolve()
+        try:
+            candidate.relative_to(self.workspace_path)
+        except ValueError as exc:
+            raise StateError(f"file path {path!s} is outside workspace") from exc
+        return candidate
 
     # === Ralph Wiggum Feedback Loop Methods ===
     def submit_ralph_wiggum_feedback(self, feedback: RalphWiggumFeedback) -> None:

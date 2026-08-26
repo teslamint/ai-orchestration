@@ -144,6 +144,18 @@ def test_orchestration_context_set_new_fields(tmp_path):
     assert context.fix_iteration_count == 1
 
 
+def test_context_rejects_task_path_outside_workspace(tmp_path):
+    import pytest
+
+    from ai_orchestration.errors import StateError
+
+    context = OrchestrationContext(
+        project_name="test", user_goal="test", workspace_path=tmp_path
+    )
+    with pytest.raises(StateError, match="outside workspace"):
+        context.resolve_workspace_file(Path("../escape.py"))
+
+
 def test_task_creation():
     task = Task(
         step_id=1,
