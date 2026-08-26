@@ -180,6 +180,7 @@ def resolve_stage_config(
     file_stages = file_stages or {}
     resolved_binary_exists = binary_exists or _default_binary_exists
 
+    uses_default = cli_value is None and stage_name not in file_stages
     if cli_value is not None:
         stage = StageConfig.from_raw(cli_value, stage_name=stage_name)
     elif stage_name in file_stages:
@@ -212,9 +213,13 @@ def resolve_stage_config(
                 f"not a supported CLI binary (must be one of "
                 f"{sorted(_KNOWN_BINARIES)})"
             )
-        _validate_binary_slot(
-            stage_name, "fallback_binary", stage.fallback_binary, resolved_binary_exists
-        )
+        if not uses_default:
+            _validate_binary_slot(
+                stage_name,
+                "fallback_binary",
+                stage.fallback_binary,
+                resolved_binary_exists,
+            )
 
     return stage
 

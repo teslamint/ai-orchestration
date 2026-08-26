@@ -9,6 +9,7 @@ subprocess test without any live network I/O. Covers S1, S2, S3, S5, AE9
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,7 @@ def test_module_invocation_help_exits_zero():
         timeout=30,
     )
     assert result.returncode == 0
-    assert "--workspace" in result.stdout
+    assert "--workspace" in re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
 
 
 def test_installed_console_script_help_exits_zero():
@@ -39,7 +40,7 @@ def test_installed_console_script_help_exits_zero():
         timeout=30,
     )
     assert result.returncode == 0
-    assert "--workspace" in result.stdout
+    assert "--workspace" in re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
 
 
 def test_installed_command_writes_exactly_beneath_workspace(tmp_path):
