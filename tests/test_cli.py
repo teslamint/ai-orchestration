@@ -112,7 +112,7 @@ def test_command_logs_are_created_inside_project_workspace(tmp_path, monkeypatch
         context.implementation_plan = [
             Task(
                 step_id=1,
-                file_path=".",
+                file_path="command.log",
                 action_type=ActionType.RUN_COMMAND,
                 instruction="echo logged",
             )
