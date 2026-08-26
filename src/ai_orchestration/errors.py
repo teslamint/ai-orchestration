@@ -28,6 +28,15 @@ class ProviderError(OrchestrationError):
     """A provider call failed after every configured fallback was applied."""
 
 
+class TaskExecutionError(OrchestrationError):
+    """An executor-stage task (e.g. a `run_command` step) failed.
+
+    Raised when the implementation plan's own build/test/migration command
+    exits nonzero after retries; a failing task must not be reported as
+    pipeline success.
+    """
+
+
 class GateError(OrchestrationError):
     """A non-interactive approval gate was reached without its authorizing flag."""
 

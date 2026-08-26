@@ -9,6 +9,7 @@ raises, returning a `CatalogStatus` outcome instead.
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import httpx
@@ -23,6 +24,10 @@ from ai_orchestration.providers.base import (
     flatten_json_schema,
 )
 from ai_orchestration.utils.extract import extract_json_object
+
+# Default per-call wall-clock limit: a hung proxy call must not stall the
+# run indefinitely (§Failure classes: "exceeds the stage timeout").
+DEFAULT_HTTP_TIMEOUT_SECONDS = 120.0
 
 
 def probe_catalog(
@@ -70,9 +75,11 @@ class HttpProvider:
         api_key: Optional[str],
         transport: Optional[httpx.BaseTransport] = None,
         max_retries: int = 2,
+        timeout: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
     ) -> None:
         self.model = model
         self.base_url = base_url
+        self.timeout = timeout
         http_client = (
             httpx.Client(transport=transport) if transport is not None else None
         )
@@ -81,6 +88,7 @@ class HttpProvider:
             api_key=api_key or "unset",
             http_client=http_client,
             max_retries=max_retries,
+            timeout=timeout,
         )
 
     def is_available(self) -> bool:
@@ -99,6 +107,13 @@ class HttpProvider:
             raise TransportError(f"{self.model}: endpoint unreachable ({exc})") from exc
         except APIStatusError as exc:
             self._raise_for_status(exc)
+        except json.JSONDecodeError as exc:
+            # HTTP 200 with a malformed JSON body: the transport is healthy
+            # but the response is unusable, so this is a model-level fault,
+            # not an unhandled crash escaping the typed error taxonomy.
+            raise ModelFaultError(
+                f"{self.model}: malformed JSON response body ({exc})"
+            ) from exc
         return response.choices[0].message.content or ""
 
     def complete_structured(
@@ -128,6 +143,10 @@ class HttpProvider:
             raise TransportError(f"{self.model}: endpoint unreachable ({exc})") from exc
         except APIStatusError as exc:
             self._raise_for_status(exc)
+        except json.JSONDecodeError as exc:
+            raise ModelFaultError(
+                f"{self.model}: malformed JSON response body ({exc})"
+            ) from exc
 
         text = response.choices[0].message.content or ""
         payload = extract_json_object(text)

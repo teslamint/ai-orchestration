@@ -216,6 +216,10 @@ class OrchestrationContext(BaseModel):
         default_factory=dict,
         description="Stage 4에서 생성된 파일별 diff (파일경로 -> diff 문자열)",
     )
+    completed_executor_task_ids: List[int] = Field(
+        default_factory=list,
+        description="재개 시 건너뛸 성공 완료 executor Task step_id 목록",
+    )
 
     # === Stage 5 Data (Codex - Code Reviewer) ===
     code_review_result: Optional[CodeReviewResult] = Field(

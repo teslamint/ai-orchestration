@@ -12,8 +12,10 @@ preserved byte-for-byte as a non-fatal warning API.
 from __future__ import annotations
 
 import json
+import os
 import selectors
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -25,19 +27,14 @@ from pydantic import BaseModel, ValidationError
 
 from ai_orchestration.providers.base import CLIProviderError, ToolType
 from ai_orchestration.utils.extract import extract_code_content, extract_json_object
+from ai_orchestration.utils.subprocess_diag import truncate_stderr as _truncate_stderr
 
 _HEARTBEAT_INTERVAL_DEFAULT = 10.0
 
-
-def _truncate_stderr(stderr: str, max_lines: int = 5, max_chars: int = 200) -> str:
-    """Truncate stderr to a short excerpt for diagnostics."""
-    if not stderr:
-        return "(no stderr)"
-    lines = stderr.strip().splitlines()[:max_lines]
-    excerpt = "\n".join(lines)
-    if len(excerpt) > max_chars:
-        excerpt = excerpt[:max_chars] + "..."
-    return excerpt
+# A hung CLI subprocess must not stall the run indefinitely (§Failure
+# classes: "exceeds the stage timeout"). This is the default for every real
+# `complete()`/`complete_structured()` call site; callers may override it.
+DEFAULT_CLI_TIMEOUT_SECONDS = 300.0
 
 
 def _extract_stream_json_text(line: str) -> list[str]:
@@ -92,7 +89,12 @@ def _run_cli_subprocess(
     Raises `CLIProviderError` naming the binary for every failure row in the
     spec's CLI-attempts table: missing binary, spawn failure, nonzero exit,
     timeout, and unparseable output (the last is the caller's job once this
-    returns text that fails validation).
+    returns text that fails validation). Runs in its own process group
+    (`start_new_session=True`) so a timeout kills the whole descendant
+    chain via `os.killpg`, not just the immediate child. Both stdout and
+    stderr are registered with the selector: watching stdout alone risks a
+    deadlock once a child fills the stderr pipe buffer after closing
+    stdout.
     """
     if not shutil.which(args[0]):
         raise CLIProviderError(f"{binary_name}: binary not found on PATH")
@@ -104,52 +106,82 @@ def _run_cli_subprocess(
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            start_new_session=True,
         )
     except OSError as exc:
         raise CLIProviderError(f"{binary_name}: failed to start ({exc})") from exc
 
     assert process.stdout is not None
+    assert process.stderr is not None
     merged_output: list[str] = []
+    stderr_lines: list[str] = []
     parsed_chunks: list[str] = []
     sel = selectors.DefaultSelector()
-    sel.register(process.stdout, selectors.EVENT_READ)
+    sel.register(process.stdout, selectors.EVENT_READ, "stdout")
+    sel.register(process.stderr, selectors.EVENT_READ, "stderr")
     start = time.monotonic()
     last_output = start
     last_heartbeat = start
 
-    try:
-        while sel.get_map():
-            if timeout is not None and time.monotonic() - start > timeout:
-                process.kill()
-                process.wait()
-                raise CLIProviderError(f"{binary_name}: exceeded timeout of {timeout}s")
-            events = sel.select(timeout=min(heartbeat_interval, 1.0))
-            if not events:
-                now = time.monotonic()
-                if now - last_output >= heartbeat_interval and (
-                    now - last_heartbeat >= heartbeat_interval
-                ):
-                    if on_heartbeat is not None:
-                        on_heartbeat()
-                    last_heartbeat = now
-                if process.poll() is not None:
-                    break
+    def _kill_process_group() -> None:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+    while sel.get_map():
+        if timeout is not None and time.monotonic() - start > timeout:
+            _kill_process_group()
+            raise CLIProviderError(f"{binary_name}: exceeded timeout of {timeout}s")
+        remaining = (
+            None if timeout is None else max(0.0, timeout - (time.monotonic() - start))
+        )
+        events = sel.select(
+            timeout=min(heartbeat_interval, 1.0, remaining)
+            if remaining is not None
+            else min(heartbeat_interval, 1.0)
+        )
+        if not events:
+            now = time.monotonic()
+            if now - last_output >= heartbeat_interval and (
+                now - last_heartbeat >= heartbeat_interval
+            ):
+                if on_heartbeat is not None:
+                    on_heartbeat()
+                last_heartbeat = now
+            if process.poll() is not None and not sel.get_map():
+                break
+            continue
+        for key, _ in events:
+            stream = key.fileobj
+            chunk = os.read(stream.fileno(), 65536).decode("utf-8", errors="replace")
+            if chunk == "":
+                sel.unregister(stream)
                 continue
-            for key, _ in events:
-                line = key.fileobj.readline()
-                if line == "":
-                    sel.unregister(key.fileobj)
-                    continue
-                line = line.rstrip("\n")
-                merged_output.append(line)
+            for line in chunk.splitlines():
                 last_output = time.monotonic()
+                if key.data == "stderr":
+                    stderr_lines.append(line)
+                    continue
+                merged_output.append(line)
                 if parse_stream_json:
                     parsed_chunks.extend(_extract_stream_json_text(line))
-    except subprocess.TimeoutExpired as exc:
-        raise CLIProviderError(f"{binary_name}: timed out ({exc})") from exc
 
-    returncode = process.wait()
-    stderr_text = process.stderr.read() if process.stderr else ""
+    remaining = (
+        None if timeout is None else max(0.0, timeout - (time.monotonic() - start))
+    )
+    try:
+        returncode = process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_group()
+        raise CLIProviderError(
+            f"{binary_name}: exceeded timeout of {timeout}s"
+        ) from exc
+    stderr_text = "\n".join(stderr_lines)
     combined = "\n".join(merged_output)
 
     if returncode != 0:
@@ -185,39 +217,27 @@ class BaseCLIProvider:
         *,
         system: Optional[str] = None,
         debug: bool = False,
-        timeout: Optional[float] = None,
+        timeout: Optional[float] = DEFAULT_CLI_TIMEOUT_SECONDS,
         on_heartbeat: Optional[Callable[[], None]] = None,
     ) -> str:
-        if not shutil.which(self._binary_name):
-            raise CLIProviderError(f"{self._binary_name}: binary not found on PATH")
+        """Run the CLI binary and return its output.
+
+        Always routes through `_run_cli_subprocess`, the process-group-safe
+        runner (its own session via `start_new_session=True`, killed with
+        `os.killpg` on timeout). `debug` no longer selects a different
+        subprocess path -- it only tells `build_command` to request the
+        CLI's stream-JSON output format where supported, so this parses
+        that format back into plain text; timeout/descendant cleanup never
+        depends on it.
+        """
         cmd = self.build_command(prompt, debug=debug)
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                encoding="utf-8",
-                timeout=timeout,
-            )
-            return result.stdout.strip()
-        except FileNotFoundError as exc:
-            raise CLIProviderError(
-                f"{self._binary_name}: binary not found on PATH"
-            ) from exc
-        except PermissionError as exc:
-            raise CLIProviderError(
-                f"{self._binary_name}: failed to start ({exc})"
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise CLIProviderError(
-                f"{self._binary_name}: exceeded timeout of {timeout}s"
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            raise CLIProviderError(
-                f"{self._binary_name}: exited with code {exc.returncode}: "
-                f"{_truncate_stderr(exc.stderr or '')}"
-            ) from exc
+        return _run_cli_subprocess(
+            cmd,
+            binary_name=self._binary_name,
+            timeout=timeout,
+            on_heartbeat=on_heartbeat,
+            parse_stream_json=debug,
+        )
 
     def complete_structured(
         self, prompt: str, *, schema: type[BaseModel], debug: bool = False
@@ -259,14 +279,22 @@ class AgyProvider(BaseCLIProvider):
         ]
 
     def complete_structured(
-        self, prompt: str, *, schema: type[BaseModel], debug: bool = False
+        self,
+        prompt: str,
+        *,
+        schema: type[BaseModel],
+        debug: bool = False,
+        timeout: Optional[float] = DEFAULT_CLI_TIMEOUT_SECONDS,
     ) -> BaseModel:
         """Native structured output first, extraction fallback second.
 
         agy enforces a schema natively via `--json-schema`/`--output-format
         json`, returning a `structured_output` object in its JSON envelope
         (A12). On malformed, missing, or invalid output this falls back to
-        the same extraction path Codex/Claude use.
+        the same extraction path Codex/Claude use. Routes through
+        `_run_cli_subprocess` (process-group-safe timeout/descendant kill),
+        the same runner `BaseCLIProvider.complete` uses -- this is not a
+        text-completion call so it cannot simply delegate to `complete()`.
         """
         flat_schema = schema.model_json_schema()
         with tempfile.NamedTemporaryFile(
@@ -276,18 +304,9 @@ class AgyProvider(BaseCLIProvider):
             schema_path = handle.name
         try:
             cmd = self.build_structured_command(prompt, schema_path)
-            try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, check=True, encoding="utf-8"
-                )
-                text = result.stdout.strip()
-            except FileNotFoundError as exc:
-                raise CLIProviderError("agy: binary not found on PATH") from exc
-            except subprocess.CalledProcessError as exc:
-                raise CLIProviderError(
-                    f"agy: exited with code {exc.returncode}: "
-                    f"{_truncate_stderr(exc.stderr or '')}"
-                ) from exc
+            text = _run_cli_subprocess(
+                cmd, binary_name=self._binary_name, timeout=timeout
+            )
 
             envelope = extract_json_object(text)
             if envelope is not None and "structured_output" in envelope:

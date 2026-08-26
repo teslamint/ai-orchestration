@@ -107,6 +107,117 @@ def test_load_state_corrupt_json_raises_state_error(tmp_path):
         load_state(path)
 
 
+# --- Persisted-boundary type validation (finding #2, P0) -------------------
+
+
+def test_load_state_rejects_wrong_typed_outputs_field(tmp_path):
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "outputs": 12345,  # must be a dict, not an int
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError):
+        load_state(path)
+
+
+def test_load_state_rejects_wrong_typed_config_snapshot_field(tmp_path):
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": "not-a-dict",
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError):
+        load_state(path)
+
+
+def test_load_state_rejects_non_string_completed_stages_items(tmp_path):
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "completed_stages": ["brainstormer", 7],
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError):
+        load_state(path)
+
+
+def test_load_state_rejects_non_dict_logs_items(tmp_path):
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "logs": [{"stage": "ok"}, "not-a-dict-entry"],
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError):
+        load_state(path)
+
+
+def test_load_state_rejects_boolean_schema_version(tmp_path):
+    # Booleans are ints in Python; a persisted JSON `true`/`false` for
+    # schema_version must never silently pass as 1/0.
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "schema_version": True,
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError):
+        load_state(path)
+
+
+def test_load_state_rejects_non_object_root(tmp_path):
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(["not", "an", "object"]))
+    with pytest.raises(StateError):
+        load_state(path)
+
+
+def test_load_state_error_never_leaks_secret_looking_field_value(tmp_path):
+    """A malformed field's raw value must never appear in the raised
+    `StateError`'s message, since a wrong-typed field could itself carry
+    a secret pasted into the wrong slot (finding #2's crafted-state
+    disclosure repro).
+    """
+    from ai_orchestration.errors import StateError
+
+    secret = "sk-ant-SECRET_TEST_KEY_XYZ_do_not_leak"
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        # Wrong type (str instead of dict) but holds a secret-looking value.
+        "outputs": secret,
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError) as excinfo:
+        load_state(path)
+    assert secret not in str(excinfo.value)
+
+
 def test_run_state_records_completed_stages_in_order():
     state = _make_state(completed_stages=["brainstormer", "brainstorming_reviewer"])
     assert state.completed_stages == ["brainstormer", "brainstorming_reviewer"]
@@ -198,3 +309,82 @@ def test_state_file_json_is_stable_and_readable(tmp_path):
     raw = json.loads(path.read_text())
     assert raw["current_stage"] == "executor"
     assert raw["schema_version"] == 1
+
+
+# --- Concurrent-run lock (finding #5) ---------------------------------------
+
+
+def test_acquire_run_lock_blocks_second_concurrent_holder(tmp_path):
+    from ai_orchestration.engine.state import RunLockedError, acquire_run_lock
+
+    path = tmp_path / "run_state.json"
+    with acquire_run_lock(path):
+        with pytest.raises(RunLockedError):
+            with acquire_run_lock(path):
+                pass  # pragma: no cover - must not be reached
+
+
+def test_acquire_run_lock_releases_on_exit_for_next_holder(tmp_path):
+    from ai_orchestration.engine.state import acquire_run_lock
+
+    path = tmp_path / "run_state.json"
+    with acquire_run_lock(path):
+        pass
+    # Must not raise: the first holder released on context exit.
+    with acquire_run_lock(path):
+        pass
+
+
+def test_acquire_run_lock_releases_even_when_body_raises(tmp_path):
+    from ai_orchestration.engine.state import acquire_run_lock
+
+    path = tmp_path / "run_state.json"
+    with pytest.raises(ValueError):
+        with acquire_run_lock(path):
+            raise ValueError("boom")
+    # The lock must still be released despite the exception.
+    with acquire_run_lock(path):
+        pass
+
+
+def test_acquire_run_lock_creates_parent_directories(tmp_path):
+    from ai_orchestration.engine.state import acquire_run_lock
+
+    path = tmp_path / "nested" / "dir" / "run_state.json"
+    with acquire_run_lock(path):
+        pass
+    assert path.parent.exists()
+
+
+def test_acquire_run_lock_survives_stray_lock_file_deletion(tmp_path):
+    """finding #7 repro: the pre-fix lock lived on a disposable sibling
+    `.lock` file; deleting that file out from under the holder let a
+    second acquirer's `os.open(..., O_CREAT)` mint a fresh inode and
+    believe it held its own exclusive lock, while the first holder still
+    believed it held the (now orphaned) original. The fix locks the
+    run-state directory itself -- a load-bearing object, not a disposable
+    marker -- so deleting an incidental `.lock`-named file next to it has
+    zero effect on the held lock: a second acquirer must still be refused.
+    """
+    from ai_orchestration.engine.state import RunLockedError, acquire_run_lock
+
+    path = tmp_path / "run_state.json"
+    with acquire_run_lock(path):
+        stray_lock_file = path.parent / f".{path.name}.lock"
+        stray_lock_file.write_text("")
+        stray_lock_file.unlink()  # the old vulnerable file, deleted mid-hold
+        with pytest.raises(RunLockedError):
+            with acquire_run_lock(path):
+                pass  # pragma: no cover - must not be reached
+
+
+def test_acquire_run_lock_survives_state_directory_recreation(tmp_path):
+    from ai_orchestration.engine.state import RunLockedError, acquire_run_lock
+
+    path = tmp_path / "project" / ".ai_orchestration" / "run_state.json"
+    with acquire_run_lock(path):
+        os.rmdir(path.parent)
+        path.parent.mkdir()
+        with pytest.raises(RunLockedError):
+            with acquire_run_lock(path):
+                pass

@@ -195,11 +195,23 @@ def resolve_stage_config(
     if stage.fallback_model is not None:
         # fallback_model is same-endpoint by definition (§Stage resolution):
         # always a proxy id, never classified by binary-name pattern.
+        if stage.fallback_model == stage.model:
+            raise ConfigError(
+                f"{stage_name}: fallback_model '{stage.fallback_model}' is "
+                "identical to model; a real model fault would retry the "
+                "same failing model"
+            )
         _validate_proxy_slot(
             stage_name, "fallback_model", stage.fallback_model, catalog
         )
 
     if stage.fallback_binary is not None:
+        if stage.fallback_binary not in _KNOWN_BINARIES:
+            raise ConfigError(
+                f"{stage_name}: fallback_binary '{stage.fallback_binary}' is "
+                f"not a supported CLI binary (must be one of "
+                f"{sorted(_KNOWN_BINARIES)})"
+            )
         _validate_binary_slot(
             stage_name, "fallback_binary", stage.fallback_binary, resolved_binary_exists
         )

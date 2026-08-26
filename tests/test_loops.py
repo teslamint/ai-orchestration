@@ -254,6 +254,60 @@ def test_ralph_wiggum_loop_accepts_by_threshold(tmp_path):
     assert context.is_ralph_wiggum_accepted() is True
 
 
+def test_ralph_wiggum_loop_accepts_on_promise_tag_even_below_threshold(tmp_path):
+    # Mutation-guarded: finding #19 — before the fix, check_promise_completion
+    # was never called, so --completion-promise had no effect on the loop.
+    # A low confidence score that would normally continue iterating must
+    # still stop here because the promise tag is present in comments.
+    from ai_orchestration.engine.loops import run_ralph_wiggum_loop
+    from ai_orchestration.models.context import IterationMetadata
+
+    context = _context(
+        tmp_path,
+        ralph_wiggum_enabled=True,
+        ralph_wiggum_threshold=0.99,
+        ralph_wiggum_completion_promise="DONE",
+        ralph_wiggum_iteration=IterationMetadata(review_attempt=1, max_attempts=5),
+    )
+    call_count = {"n": 0}
+
+    def run_review(ctx):
+        call_count["n"] += 1
+        ctx.ralph_wiggum_feedback = RalphWiggumFeedback(
+            decision=ReviewDecision.NEEDS_REVISION,
+            confidence_score=0.1,
+            comments=["all set <promise>DONE</promise>"],
+        )
+
+    run_ralph_wiggum_loop(context, run_review=run_review, write_state_file=False)
+    assert call_count["n"] == 1  # stopped immediately on the promise tag
+
+
+def test_ralph_wiggum_loop_ignores_mismatched_promise_tag(tmp_path):
+    from ai_orchestration.engine.loops import run_ralph_wiggum_loop
+    from ai_orchestration.models.context import IterationMetadata
+
+    context = _context(
+        tmp_path,
+        ralph_wiggum_enabled=True,
+        ralph_wiggum_threshold=0.99,
+        ralph_wiggum_completion_promise="DONE",
+        ralph_wiggum_iteration=IterationMetadata(review_attempt=1, max_attempts=2),
+    )
+    call_count = {"n": 0}
+
+    def run_review(ctx):
+        call_count["n"] += 1
+        ctx.ralph_wiggum_feedback = RalphWiggumFeedback(
+            decision=ReviewDecision.NEEDS_REVISION,
+            confidence_score=0.1,
+            comments=["still working <promise>WRONG_TAG</promise>"],
+        )
+
+    run_ralph_wiggum_loop(context, run_review=run_review, write_state_file=False)
+    assert call_count["n"] == 2  # ran to max_attempts; promise never matched
+
+
 def test_ralph_wiggum_loop_stops_at_max_iterations(tmp_path):
     from ai_orchestration.engine.loops import run_ralph_wiggum_loop
     from ai_orchestration.models.context import IterationMetadata

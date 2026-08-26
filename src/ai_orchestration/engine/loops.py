@@ -212,13 +212,18 @@ def run_ralph_wiggum_loop(
             if not context.ralph_wiggum_feedback:
                 return
 
+            feedback = context.ralph_wiggum_feedback
+            if context.ralph_wiggum_completion_promise:
+                last_output = " ".join(feedback.comments)
+                if context.check_promise_completion(last_output):
+                    return
+
             if context.is_ralph_wiggum_accepted():
                 return
 
             if not context.can_ralph_wiggum_retry():
                 return
 
-            feedback = context.ralph_wiggum_feedback
             context.prepare_ralph_wiggum_retry()
             if write_state_file:
                 _write_ralph_state_file(context)

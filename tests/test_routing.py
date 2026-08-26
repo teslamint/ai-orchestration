@@ -311,3 +311,149 @@ def test_complete_structured_with_fallback_binary_model_uses_cli_complete_struct
     )
     assert result == _Plan(step_id=42)
     assert provider_used == "codex"
+
+
+# --- HTTP 200 + malformed JSON body (finding #6) ----------------------------
+
+
+def test_http_provider_complete_malformed_json_body_raises_model_fault_error():
+    def handler(request):
+        return httpx.Response(
+            200, content=b"not json{{{", headers={"content-type": "application/json"}
+        )
+
+    provider = HttpProvider(
+        model="x",
+        base_url="http://stub/v1",
+        api_key="k",
+        transport=httpx.MockTransport(handler),
+        max_retries=0,
+    )
+    with pytest.raises(ModelFaultError):
+        provider.complete("hi")
+
+
+def test_http_provider_complete_structured_malformed_json_body_raises_model_fault_error():
+    def handler(request):
+        return httpx.Response(
+            200, content=b"not json{{{", headers={"content-type": "application/json"}
+        )
+
+    provider = HttpProvider(
+        model="x",
+        base_url="http://stub/v1",
+        api_key="k",
+        transport=httpx.MockTransport(handler),
+        max_retries=0,
+    )
+    with pytest.raises(ModelFaultError):
+        provider.complete_structured("hi", schema=_Plan)
+
+
+# --- Default HTTP timeout wiring (finding #10) ------------------------------
+
+
+def test_http_provider_default_timeout_is_wired():
+    from ai_orchestration.providers.http import DEFAULT_HTTP_TIMEOUT_SECONDS
+
+    provider = HttpProvider(model="x", base_url="http://stub/v1", api_key="k")
+    assert provider.timeout == DEFAULT_HTTP_TIMEOUT_SECONDS
+    assert DEFAULT_HTTP_TIMEOUT_SECONDS is not None
+    assert DEFAULT_HTTP_TIMEOUT_SECONDS > 0
+
+
+def test_http_provider_timeout_reaches_openai_client(monkeypatch):
+    captured = {}
+
+    class _SpyOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    import ai_orchestration.providers.http as http_module
+
+    monkeypatch.setattr(http_module, "OpenAI", _SpyOpenAI)
+    HttpProvider(model="x", base_url="http://stub/v1", api_key="k", timeout=42.0)
+    assert captured.get("timeout") == 42.0
+
+
+# --- Chained diagnostics naming both model/binary on double failure (#23) --
+
+
+def test_complete_with_fallback_names_both_diagnostics_and_chains_cause():
+    class _AlwaysFaulty:
+        def __init__(self, model):
+            self.model = model
+
+        def complete(self, prompt, **kwargs):
+            raise ModelFaultError(f"{self.model}: HTTP 429")
+
+    stage = StageConfig(model="primary-fault-model", fallback_model="fallback-model")
+    with pytest.raises(ProviderError) as exc_info:
+        complete_with_fallback(
+            stage,
+            "prompt",
+            http_provider_factory=_AlwaysFaulty,
+            cli_provider_factory=lambda b: _StubCLI(b, output="unused"),
+        )
+    message = str(exc_info.value)
+    assert "primary-fault-model" in message
+    assert "fallback-model" in message
+    assert exc_info.value.__cause__ is not None
+
+
+def test_complete_structured_with_fallback_names_both_diagnostics_and_chains_cause():
+    class _AlwaysFaultyStructured:
+        def __init__(self, model):
+            self.model = model
+
+        def complete_structured(self, prompt, *, schema, **kwargs):
+            raise ModelFaultError(f"{self.model}: HTTP 429")
+
+    stage = StageConfig(model="primary-fault-model", fallback_model="fallback-model")
+    with pytest.raises(ProviderError) as exc_info:
+        complete_structured_with_fallback(
+            stage,
+            "prompt",
+            schema=_Plan,
+            http_provider_factory=_AlwaysFaultyStructured,
+            cli_provider_factory=lambda b: _StubCLI(b, output="unused"),
+        )
+    message = str(exc_info.value)
+    assert "primary-fault-model" in message
+    assert "fallback-model" in message
+    assert exc_info.value.__cause__ is not None
+
+
+# --- Self-referential fallback_model rejected (finding #24) ----------------
+
+
+def test_resolve_stage_config_rejects_self_referential_fallback_model():
+    from ai_orchestration.config import resolve_stage_config
+    from ai_orchestration.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="fallback_model"):
+        resolve_stage_config(
+            "planner",
+            cli_value=None,
+            file_stages={"planner": {"model": "gpt-5.5", "fallback_model": "gpt-5.5"}},
+            catalog=CatalogStatus(outcome=CatalogOutcome.UNREACHABLE),
+        )
+
+
+# --- fallback_binary restricted to the known CLI set (finding #17) ---------
+
+
+def test_resolve_stage_config_rejects_unsupported_fallback_binary():
+    from ai_orchestration.config import resolve_stage_config
+    from ai_orchestration.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="fallback_binary"):
+        resolve_stage_config(
+            "planner",
+            cli_value=None,
+            file_stages={
+                "planner": {"model": "gpt-5.5", "fallback_binary": "some-other-cli"}
+            },
+            catalog=CatalogStatus(outcome=CatalogOutcome.UNREACHABLE),
+            binary_exists=lambda _name: True,
+        )

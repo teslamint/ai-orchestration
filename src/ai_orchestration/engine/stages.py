@@ -84,18 +84,6 @@ def parse_approach_options(text: str) -> list[str]:
     return options
 
 
-def _truncate_stderr(stderr: str, max_lines: int = 5, max_chars: int = 200) -> str:
-    if not stderr:
-        return "(no stderr)"
-    lines = stderr.strip().splitlines()
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-    truncated = "\n".join(lines)
-    if len(truncated) > max_chars:
-        truncated = truncated[:max_chars] + "..."
-    return truncated
-
-
 def _confirm(prompt: str) -> bool:
     """Interactive confirm, overridable in tests via monkeypatch."""
     return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")

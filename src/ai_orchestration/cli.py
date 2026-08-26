@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.panel import Panel
 
@@ -34,12 +36,25 @@ from ai_orchestration.engine.loops import (
     run_ralph_wiggum_loop,
 )
 from ai_orchestration.engine.stages import CommandExecutor, parse_approach_options
-from ai_orchestration.engine.state import RunState, resolve_run_start, save_state
-from ai_orchestration.errors import ConfigError, OrchestrationError, RoutingError
+from ai_orchestration.engine.state import (
+    RunLockedError,
+    RunState,
+    acquire_run_lock,
+    resolve_run_start,
+    save_state,
+)
+from ai_orchestration.errors import (
+    ConfigError,
+    OrchestrationError,
+    RoutingError,
+    StateError,
+    TaskExecutionError,
+)
 from ai_orchestration.models.context import (
     ActionType,
     CodeReviewItem,
     CodeReviewResult,
+    IterationMetadata,
     OrchestrationContext,
     RalphWiggumFeedback,
     Task,
@@ -54,7 +69,7 @@ from ai_orchestration.providers.routing import (
 from ai_orchestration.utils.extract import extract_json_list
 from ai_orchestration.utils.slug import generate_project_name
 
-app = typer.Typer()
+app = typer.Typer(pretty_exceptions_show_locals=False)
 console = Console()
 
 _STAGE_FLAG_NAMES = {
@@ -112,14 +127,22 @@ class _OfflineSmokeProvider:
 
 # --- Provider factory seams (overridden by tests, real by default) ---------
 
+# Startup-resolved endpoint config, read by the real (non-monkeypatched)
+# `_http_provider_factory` below. Tests always replace the whole factory,
+# so they never observe this global; it exists solely so a custom
+# `--tool-config` `"provider"` block reaches every real completion call,
+# not just startup catalog validation (finding #3).
+_active_provider_config = ProviderConfig()
+
 
 def _http_provider_factory(model: str):
-    """Default HTTP provider factory: real CLIProxyAPI via the configured endpoint."""
+    """Default HTTP provider factory: real CLIProxyAPI via the resolved endpoint."""
     if os.environ.get(_FAKE_PROVIDERS_ENV_VAR):
         return _OfflineSmokeProvider()
-    provider_config = ProviderConfig.from_raw(None)
     return HttpProvider(
-        model=model, base_url=provider_config.base_url, api_key=provider_config.api_key
+        model=model,
+        base_url=_active_provider_config.base_url,
+        api_key=_active_provider_config.api_key,
     )
 
 
@@ -151,10 +174,46 @@ def _confirm_interactively(prompt: str) -> bool:
     return typer.confirm(prompt)
 
 
+# --- Debug logging: append-only file, mirrors legacy _write_debug_log ------
+
+
+def _write_debug_log(
+    debug: bool, debug_log_path: Optional[Path], stage: str, content: str
+) -> None:
+    if not debug or debug_log_path is None:
+        return
+    try:
+        debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n\n==== {stage} ====\n")
+            handle.write(content)
+    except OSError as exc:
+        console.print(f"[yellow]Debug log write failed: {exc}[/yellow]")
+
+
+def _resolve_debug_log_path(debug: bool, debug_log: str) -> Optional[Path]:
+    if not debug:
+        return None
+    log_path = Path(debug_log)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if log_path.suffix:
+        return log_path.with_name(
+            f"{log_path.stem}-{timestamp}{log_path.suffix}"
+        ).resolve()
+    return (log_path / f"orchestrator_debug-{timestamp}.log").resolve()
+
+
 # --- Stage runners: thin wrappers over routing + prompts --------------------
 
 
-def _complete_stage_text(stage_name: str, stage: StageConfig, prompt: str) -> str:
+def _complete_stage_text(
+    stage_name: str,
+    stage: StageConfig,
+    prompt: str,
+    *,
+    debug: bool,
+    debug_log_path: Optional[Path],
+) -> str:
     text, _provider_used = complete_with_fallback(
         stage,
         prompt,
@@ -162,10 +221,19 @@ def _complete_stage_text(stage_name: str, stage: StageConfig, prompt: str) -> st
         cli_provider_factory=_cli_provider_factory,
         system=AGENT_PROMPTS[stage_name].get("system", ""),
     )
+    _write_debug_log(debug, debug_log_path, f"{stage_name} raw output", text)
     return text
 
 
-def _complete_stage_structured(stage: StageConfig, prompt: str, *, schema):
+def _complete_stage_structured(
+    stage: StageConfig,
+    prompt: str,
+    *,
+    schema,
+    debug: bool,
+    debug_log_path: Optional[Path],
+    stage_name: str,
+):
     result, _provider_used = complete_structured_with_fallback(
         stage,
         prompt,
@@ -173,19 +241,22 @@ def _complete_stage_structured(stage: StageConfig, prompt: str, *, schema):
         http_provider_factory=_http_provider_factory,
         cli_provider_factory=_cli_provider_factory,
     )
+    _write_debug_log(
+        debug, debug_log_path, f"{stage_name} structured output", repr(result)
+    )
     return result
 
 
-def _run_brainstormer(context: OrchestrationContext, stage: StageConfig) -> None:
+def _run_brainstormer(context: OrchestrationContext, stage: StageConfig, **d) -> None:
     prompt = AGENT_PROMPTS["brainstormer"]["user"].format(
         user_goal=context.user_goal, tooling_context="unknown"
     )
-    output = _complete_stage_text("brainstormer", stage, prompt)
+    output = _complete_stage_text("brainstormer", stage, prompt, **d)
     context.brainstorming_ideas = output
 
 
 def _run_brainstorming_reviewer(
-    context: OrchestrationContext, stage: StageConfig
+    context: OrchestrationContext, stage: StageConfig, **d
 ) -> None:
     ideas = context.brainstorming_ideas
     ideas_text = ideas if isinstance(ideas, str) else "\n".join(ideas)
@@ -194,63 +265,137 @@ def _run_brainstorming_reviewer(
         tooling_context="unknown",
         brainstorming_ideas=ideas_text,
     )
-    output = _complete_stage_text("brainstorming_reviewer", stage, prompt)
+    output = _complete_stage_text("brainstorming_reviewer", stage, prompt, **d)
     context.refined_brainstorming = output
 
 
-def _select_approach(context: OrchestrationContext, *, auto_select: bool) -> None:
+def _select_approach(
+    context: OrchestrationContext,
+    *,
+    auto_select: bool,
+    prompt_choice: Optional[callable] = None,
+    prompt_custom: Optional[callable] = None,
+) -> None:
+    """Select an implementation approach, preserving the legacy interactive
+    numbered-menu path (auto-select was previously the only branch wired).
+
+    `prompt_choice`/`prompt_custom` are injectable so tests never need a
+    real TTY; the CLI wires them to `typer.prompt` in non-auto-select mode.
+    """
     ideas_to_use = context.refined_brainstorming or context.brainstorming_ideas
     ideas_text = (
         ideas_to_use if isinstance(ideas_to_use, str) else "\n".join(ideas_to_use)
     )
     options = parse_approach_options(ideas_text)
-    if auto_select:
+
+    if auto_select or prompt_choice is None:
         context.selected_approach = options[0] if options else ideas_text
+        return
+
+    console.print("\n[bold]Please select an approach:[/bold]")
+    for i, opt in enumerate(options):
+        console.print(f"  {i + 1}: {opt}")
+    console.print(f"  {len(options) + 1}: [dim]Custom (enter your own)[/dim]")
+
+    choice = prompt_choice()
+    if 1 <= choice <= len(options):
+        context.selected_approach = options[choice - 1]
+    elif choice == len(options) + 1 and prompt_custom is not None:
+        context.selected_approach = prompt_custom()
     else:
+        console.print(
+            "[yellow]Invalid selection. Using the first approach as default.[/yellow]"
+        )
         context.selected_approach = options[0] if options else ideas_text
 
 
-def _run_planner(context: OrchestrationContext, stage: StageConfig) -> None:
+def _run_planner(context: OrchestrationContext, stage: StageConfig, **d) -> None:
     prompt = AGENT_PROMPTS["planner"]["user"].format(
         user_goal=context.user_goal,
         tooling_context="unknown",
         brainstorming_ideas=context.refined_brainstorming or "",
         selected_approach=context.selected_approach or "",
     )
-    output = _complete_stage_text("planner", stage, prompt)
+    output = _complete_stage_text("planner", stage, prompt, **d)
     json_plan = extract_json_list(output)
     tasks = []
+    step_ids = set()
     for item in json_plan:
         try:
-            tasks.append(Task(**item))
+            task = Task(**item)
         except Exception:
             continue
+        if task.step_id in step_ids:
+            raise StateError(f"planner returned duplicate task step_id {task.step_id}")
+        step_ids.add(task.step_id)
+        tasks.append(task)
     context.implementation_plan = tasks
 
 
+def _read_existing_code(context: OrchestrationContext, task: Task) -> str:
+    """Read the current on-disk content of `task.file_path`, if any.
+
+    `EDIT_FILE` tasks must see real file content to produce a real edit
+    (legacy behavior); `CREATE_FILE` tasks on a not-yet-existing path
+    correctly see an empty string.
+    """
+    target_path = context.workspace_path / task.file_path
+    if not target_path.exists():
+        return ""
+    try:
+        return target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 def _run_executor(
-    context: OrchestrationContext, stage: StageConfig, command_executor: CommandExecutor
+    context: OrchestrationContext,
+    stage: StageConfig,
+    command_executor: CommandExecutor,
+    *,
+    checkpoint_task: Callable[[int], None],
+    **d,
 ) -> None:
+    completed_task_ids = set(context.completed_executor_task_ids)
     for task in context.implementation_plan:
+        if task.step_id in completed_task_ids:
+            continue
         if task.action_type == ActionType.RUN_COMMAND:
-            command_executor.run(task.instruction, cwd=str(context.workspace_path))
+            success, output, _logs = command_executor.run(
+                task.instruction, cwd=str(context.workspace_path)
+            )
+            if not success and "skipped by user" not in output.lower():
+                raise TaskExecutionError(
+                    f"run_command task {task.step_id} failed: {output}"
+                )
+            if success:
+                context.completed_executor_task_ids.append(task.step_id)
+                completed_task_ids.add(task.step_id)
+                checkpoint_task(task.step_id)
             continue
 
-        def _complete(prompt: str) -> str:
+        existing_code = _read_existing_code(context, task)
+
+        def _complete(prompt: str, *, _task=task, _existing=existing_code) -> str:
             full_prompt = AGENT_PROMPTS["executor"]["user"].format(
                 user_goal=context.user_goal,
-                step_id=task.step_id,
-                action_type=task.action_type.value,
-                file_path=str(task.file_path),
+                step_id=_task.step_id,
+                action_type=_task.action_type.value,
+                file_path=str(_task.file_path),
                 instruction=prompt,
-                existing_code="",
+                existing_code=_existing,
             )
-            return _complete_stage_text("executor", stage, full_prompt)
+            return _complete_stage_text("executor", stage, full_prompt, **d)
 
-        run_executor_self_healing(context, task, complete=_complete)
+        result = run_executor_self_healing(context, task, complete=_complete)
+        if not result.success:
+            raise TaskExecutionError(f"executor task {task.step_id} failed")
+        context.completed_executor_task_ids.append(task.step_id)
+        completed_task_ids.add(task.step_id)
+        checkpoint_task(task.step_id)
 
 
-def _run_code_reviewer(context: OrchestrationContext, stage: StageConfig) -> None:
+def _run_code_reviewer(context: OrchestrationContext, stage: StageConfig, **d) -> None:
     prompt = AGENT_PROMPTS["code_reviewer"]["user"].format(
         user_goal=context.user_goal,
         plan_summary=str(len(context.implementation_plan)),
@@ -259,12 +404,14 @@ def _run_code_reviewer(context: OrchestrationContext, stage: StageConfig) -> Non
         code_diffs=str(context.generated_diffs),
         file_contents="",
     )
-    result = _complete_stage_structured(stage, prompt, schema=CodeReviewResult)
+    result = _complete_stage_structured(
+        stage, prompt, schema=CodeReviewResult, stage_name="code_reviewer", **d
+    )
     context.code_review_result = result
 
 
 def _run_fixer(
-    context: OrchestrationContext, stage: StageConfig, item: CodeReviewItem
+    context: OrchestrationContext, stage: StageConfig, item: CodeReviewItem, **d
 ) -> None:
     target_path = context.workspace_path / item.file_path
     current_code = (
@@ -281,13 +428,13 @@ def _run_fixer(
         line_range=f"{item.line_start}-{item.line_end}",
         code_snippet=item.code_snippet or "",
     )
-    output = _complete_stage_text("fixer", stage, prompt)
+    output = _complete_stage_text("fixer", stage, prompt, **d)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(output, encoding="utf-8")
 
 
 def _run_ralph_wiggum_reviewer(
-    context: OrchestrationContext, stage: StageConfig
+    context: OrchestrationContext, stage: StageConfig, **d
 ) -> None:
     prompt = AGENT_PROMPTS["ralph_wiggum_reviewer"]["user"].format(
         user_goal=context.user_goal,
@@ -296,7 +443,13 @@ def _run_ralph_wiggum_reviewer(
         file_list=", ".join(str(k) for k in context.generated_diffs),
         completion_promise=context.ralph_wiggum_completion_promise or "",
     )
-    feedback = _complete_stage_structured(stage, prompt, schema=RalphWiggumFeedback)
+    feedback = _complete_stage_structured(
+        stage,
+        prompt,
+        schema=RalphWiggumFeedback,
+        stage_name="ralph_wiggum_reviewer",
+        **d,
+    )
     context.ralph_wiggum_feedback = feedback
 
 
@@ -322,6 +475,14 @@ def _load_tool_config_file(path: Optional[Path]) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         console.print(f"[bold red]Error:[/bold red] malformed tool config file: {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+def _resolve_provider_config(file_stages_raw: dict) -> ProviderConfig:
+    try:
+        return ProviderConfig.from_raw(file_stages_raw.get("provider"))
+    except ConfigError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
 
 
@@ -408,8 +569,24 @@ def main(
     if project_name is None:
         project_name = generate_project_name(request)
 
-    workspace_base = resolve_workspace_base(workspace, dict(__import__("os").environ))
-    project_workspace = workspace_base / project_name
+    if any(ord(character) < 32 or ord(character) == 127 for character in project_name):
+        console.print(
+            "[bold red]Error:[/bold red] --project-name contains a control character"
+        )
+        raise typer.Exit(code=1)
+
+    workspace_base = resolve_workspace_base(workspace, dict(os.environ))
+    project_workspace = (workspace_base / project_name).resolve()
+    resolved_workspace_base = workspace_base.resolve()
+    if (
+        resolved_workspace_base != project_workspace
+        and resolved_workspace_base not in project_workspace.parents
+    ):
+        console.print(
+            "[bold red]Error:[/bold red] --project-name "
+            f"{project_name!r} escapes the workspace anchor"
+        )
+        raise typer.Exit(code=1)
 
     file_stages_raw = _load_tool_config_file(tool_config_file)
     stage_cli_values = {
@@ -421,7 +598,7 @@ def main(
         "fixer": fixer,
     }
 
-    provider_config = ProviderConfig.from_raw(file_stages_raw.get("provider"))
+    provider_config = _resolve_provider_config(file_stages_raw)
     catalog = _probe_catalog_for_startup(
         provider_config.base_url, provider_config.api_key
     )
@@ -431,6 +608,8 @@ def main(
         stages[stage_name] = _resolve_and_validate_stage(
             stage_name, cli_value, file_stages_raw, catalog
         )
+
+    debug_log_path = _resolve_debug_log_path(debug, debug_log)
 
     config = OrchestratorConfig(
         workspace_path=project_workspace,
@@ -443,7 +622,7 @@ def main(
         skip_review=skip_review,
         max_fix_iterations=max_fix_iterations,
         debug=debug,
-        debug_log_path=Path(debug_log) if debug else None,
+        debug_log_path=debug_log_path,
         enable_ralph_wiggum=enable_ralph_wiggum,
         ralph_wiggum_threshold=ralph_wiggum_threshold,
         ralph_wiggum_max_iterations=ralph_wiggum_max_iterations,
@@ -458,6 +637,8 @@ def main(
             f"[dim]Stage models: "
             f"{', '.join(f'{k}={v.model}' for k, v in config.stages.items())}[/dim]"
         )
+        if debug_log_path is not None:
+            console.print(f"[dim]Debug log file: {debug_log_path}[/dim]")
 
     console.print(
         Panel.fit(
@@ -468,127 +649,28 @@ def main(
         )
     )
 
-    context = OrchestrationContext(
-        project_name=project_name,
-        user_goal=request,
-        workspace_path=project_workspace,
-        ralph_wiggum_enabled=enable_ralph_wiggum,
-        ralph_wiggum_threshold=ralph_wiggum_threshold,
-        ralph_wiggum_completion_promise=completion_promise,
-    )
-
     state_path = project_workspace / ".ai_orchestration" / "run_state.json"
-    run_state = resolve_run_start(state_path, resume=resume)
-    if run_state.completed_stages and "context" in run_state.outputs:
-        # Resume: restore the full context (implementation_plan, diffs,
-        # review results, etc.) so stages after the resumed point have the
-        # data earlier stages produced, not an empty context.
-        context = OrchestrationContext.model_validate(run_state.outputs["context"])
 
-    command_executor = CommandExecutor(
-        auto_approve=auto_approve, retries=1, log_directory=Path("execution_logs")
-    )
-    command_gate = ApprovalGate(is_tty=_is_tty(), ask=_confirm_interactively)
-
-    def _gated_run_stage(stage_name: str, runner) -> None:
-        if stage_name in run_state.completed_stages:
-            return
-        try:
-            runner()
-        except PausedRun as exc:
-            save_state(
-                RunState(
-                    goal=request,
-                    project_name=project_name,
-                    config_snapshot={"stages": {k: v.model for k, v in stages.items()}},
-                    completed_stages=run_state.completed_stages,
-                    current_stage=stage_name,
-                    outputs={"context": context.model_dump(mode="json")},
-                    pause_reason=exc.pause_reason,
-                ),
-                state_path,
-            )
-            console.print(
-                f"[bold red]Paused:[/bold red] {exc.pause_reason} "
-                f"(requires {exc.authorizing_flag})"
-            )
-            raise typer.Exit(code=exc.exit_code) from exc
-        run_state.completed_stages.append(stage_name)
-        save_state(
-            RunState(
-                goal=request,
-                project_name=project_name,
-                config_snapshot={"stages": {k: v.model for k, v in stages.items()}},
-                completed_stages=run_state.completed_stages,
-                current_stage=None,
-                outputs={"context": context.model_dump(mode="json")},
-                pause_reason=None,
-            ),
-            state_path,
-        )
+    global _active_provider_config
+    _active_provider_config = provider_config
 
     try:
-        _gated_run_stage(
-            "brainstormer", lambda: _run_brainstormer(context, stages["brainstormer"])
-        )
-        _gated_run_stage(
-            "brainstorming_reviewer",
-            lambda: _run_brainstorming_reviewer(context, stages["reviewer"]),
-        )
-        _select_approach(context, auto_select=auto_select)
-        _gated_run_stage("planner", lambda: _run_planner(context, stages["planner"]))
-
-        def _run_executor_gated():
-            if not auto_run and any(
-                t.action_type == ActionType.RUN_COMMAND
-                for t in context.implementation_plan
-            ):
-                command_gate.request(
-                    "execute plan commands?",
-                    authorizing_flag="--auto-run",
-                    authorized=auto_run,
-                )
-            _run_executor(context, stages["executor"], command_executor)
-
-        _gated_run_stage("executor", _run_executor_gated)
-
-        if not skip_review:
-
-            def _run_review(ctx):
-                _run_code_reviewer(ctx, stages["code_reviewer"])
-
-            def _run_fix(ctx, item):
-                _run_fixer(ctx, stages["fixer"], item)
-
-            def _select(items):
-                if auto_fix:
-                    return items
-                if not _is_tty():
-                    return []
-                choice = typer.prompt("Enter your choice", default="a")
-                return select_fix_items(items, choice=choice, auto_fix=False)
-
-            run_main_review_fix_loop(
-                context,
-                run_review=_run_review,
-                run_fix=_run_fix,
-                max_fix_iterations=max_fix_iterations,
-                auto_fix=auto_fix,
-                select_items=_select,
+        with acquire_run_lock(state_path):
+            _run(
+                request=request,
+                project_name=project_name,
+                state_path=state_path,
+                config=config,
+                resume=resume,
             )
-
-        if enable_ralph_wiggum:
-            run_ralph_wiggum_loop(
-                context,
-                run_review=lambda ctx: _run_ralph_wiggum_reviewer(
-                    ctx, stages["code_reviewer"]
-                ),
-                write_state_file=ralph_wiggum_state_file,
-                run_fix=lambda ctx, item: _run_fixer(ctx, stages["fixer"], item),
-                run_code_review=lambda ctx: _run_code_reviewer(
-                    ctx, stages["code_reviewer"]
-                ),
-            )
+    except RunLockedError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+    except OSError as exc:
+        console.print(
+            "[bold red]Error:[/bold red] could not persist orchestration run state"
+        )
+        raise typer.Exit(code=1) from exc
     except OrchestrationError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -598,6 +680,234 @@ def main(
             "[bold green]All Done![/bold green]", title="6-Stage Workflow Finished"
         )
     )
+
+
+def _run(
+    *,
+    request: str,
+    project_name: str,
+    state_path: Path,
+    config: OrchestratorConfig,
+    resume: bool,
+) -> None:
+    """Run the lock-protected pipeline using one constructed configuration."""
+    context = OrchestrationContext(
+        project_name=project_name,
+        user_goal=request,
+        workspace_path=config.workspace_path,
+        ralph_wiggum_enabled=config.enable_ralph_wiggum,
+        ralph_wiggum_threshold=config.ralph_wiggum_threshold,
+        ralph_wiggum_completion_promise=config.ralph_wiggum_completion_promise,
+        ralph_wiggum_iteration=IterationMetadata(
+            max_attempts=config.ralph_wiggum_max_iterations
+        ),
+    )
+
+    try:
+        run_state = resolve_run_start(state_path, resume=resume)
+    except StateError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if run_state.completed_stages:
+        if "context" not in run_state.outputs:
+            raise StateError(
+                f"run state at {state_path} is missing required 'outputs.context'"
+            )
+        # Resume: restore the full context (implementation_plan, diffs,
+        # review results, etc.) so stages after the resumed point have the
+        # data earlier stages produced. Fields explicitly supplied on this
+        # invocation must win over the persisted snapshot, so a resuming
+        # run does not silently revert to stale flag values.
+        try:
+            restored = OrchestrationContext.model_validate(run_state.outputs["context"])
+        except OSError as exc:
+            raise StateError("could not prepare restored workspace directory") from exc
+        except (TypeError, ValidationError) as exc:
+            raise StateError(
+                f"run state at {state_path} field 'outputs.context' is invalid"
+            ) from exc
+        restored.ralph_wiggum_enabled = config.enable_ralph_wiggum
+        restored.ralph_wiggum_threshold = config.ralph_wiggum_threshold
+        restored.ralph_wiggum_completion_promise = (
+            config.ralph_wiggum_completion_promise
+        )
+        restored.ralph_wiggum_iteration.max_attempts = (
+            config.ralph_wiggum_max_iterations
+        )
+        context = restored
+
+        # A resumed run must not silently keep executing under a model
+        # swapped out from under it: revalidate the persisted config
+        # snapshot's stage models against this invocation's resolved
+        # stages before any further stage runs.
+        persisted_models = run_state.config_snapshot.get("stages", {})
+        if not isinstance(persisted_models, dict):
+            raise StateError(
+                f"run state at {state_path} field 'config_snapshot.stages' must be an object"
+            )
+        for stage_name, persisted_model in persisted_models.items():
+            current_model = config.stages.get(stage_name)
+            if current_model is not None and current_model.model != persisted_model:
+                console.print(
+                    "[bold red]Error:[/bold red] --resume: stage "
+                    f"'{stage_name}' was previously running "
+                    f"'{persisted_model}' but is now configured for "
+                    f"'{current_model.model}'. Re-run without --resume, or "
+                    "restore the original stage flags/config."
+                )
+                raise typer.Exit(code=1)
+
+    command_executor = CommandExecutor(
+        auto_approve=config.auto_approve,
+        retries=1,
+        log_directory=Path("execution_logs"),
+    )
+    command_gate = ApprovalGate(is_tty=_is_tty(), ask=_confirm_interactively)
+    stage_kwargs = dict(debug=config.debug, debug_log_path=config.debug_log_path)
+
+    def _state_snapshot(
+        *, current_stage: Optional[str], pause_reason: Optional[str]
+    ) -> RunState:
+        return RunState(
+            goal=request,
+            project_name=project_name,
+            config_snapshot={"stages": {k: v.model for k, v in config.stages.items()}},
+            completed_stages=run_state.completed_stages,
+            current_stage=current_stage,
+            outputs={"context": context.model_dump(mode="json")},
+            pause_reason=pause_reason,
+        )
+
+    def _pause(stage_name: str, exc: PausedRun) -> None:
+        save_state(
+            _state_snapshot(current_stage=stage_name, pause_reason=exc.pause_reason),
+            state_path,
+        )
+        console.print(
+            f"[bold red]Paused:[/bold red] {exc.pause_reason} "
+            f"(requires {exc.authorizing_flag})"
+        )
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    def _gated_run_stage(stage_name: str, runner: Callable[[], None]) -> None:
+        if stage_name in run_state.completed_stages:
+            return
+        try:
+            runner()
+        except PausedRun as exc:
+            _pause(stage_name, exc)
+        run_state.completed_stages.append(stage_name)
+        save_state(_state_snapshot(current_stage=None, pause_reason=None), state_path)
+
+    _gated_run_stage(
+        "brainstormer",
+        lambda: _run_brainstormer(
+            context, config.stages["brainstormer"], **stage_kwargs
+        ),
+    )
+    _gated_run_stage(
+        "brainstorming_reviewer",
+        lambda: _run_brainstorming_reviewer(
+            context, config.stages["reviewer"], **stage_kwargs
+        ),
+    )
+
+    def _prompt_choice() -> int:
+        return typer.prompt("Enter the number of your choice", type=int, default=1)
+
+    def _prompt_custom() -> str:
+        return typer.prompt("Enter your custom approach")
+
+    if "planner" not in run_state.completed_stages:
+        _select_approach(context, auto_select=True)
+    _gated_run_stage(
+        "planner",
+        lambda: _run_planner(context, config.stages["planner"], **stage_kwargs),
+    )
+
+    def _checkpoint_executor_task(_task_id: int) -> None:
+        save_state(
+            _state_snapshot(current_stage="executor", pause_reason=None), state_path
+        )
+
+    def _run_executor_gated() -> None:
+        has_run_command = any(
+            task.action_type == ActionType.RUN_COMMAND
+            for task in context.implementation_plan
+        )
+        if has_run_command:
+            if not config.auto_run:
+                command_gate.request(
+                    "execute plan commands?",
+                    authorizing_flag="--auto-run",
+                    authorized=config.auto_run,
+                )
+            if not config.auto_approve and not _is_tty():
+                command_gate.request(
+                    "confirm each executed command?",
+                    authorizing_flag="--auto-approve",
+                    authorized=config.auto_approve,
+                )
+        _run_executor(
+            context,
+            config.stages["executor"],
+            command_executor,
+            checkpoint_task=_checkpoint_executor_task,
+            **stage_kwargs,
+        )
+
+    _gated_run_stage("executor", _run_executor_gated)
+
+    if not config.skip_review:
+
+        def _run_review(ctx):
+            _run_code_reviewer(ctx, config.stages["code_reviewer"], **stage_kwargs)
+
+        def _run_fix(ctx, item):
+            _run_fixer(ctx, config.stages["fixer"], item, **stage_kwargs)
+
+        def _select(items):
+            if config.auto_fix:
+                return items
+            if not _is_tty():
+                command_gate.request(
+                    "apply selected review fixes?",
+                    authorizing_flag="--auto-fix",
+                    authorized=False,
+                )
+            choice = typer.prompt("Enter your choice", default="a")
+            return select_fix_items(items, choice=choice, auto_fix=False)
+
+        _gated_run_stage(
+            "review_fix",
+            lambda: run_main_review_fix_loop(
+                context,
+                run_review=_run_review,
+                run_fix=_run_fix,
+                max_fix_iterations=config.max_fix_iterations,
+                auto_fix=config.auto_fix,
+                select_items=_select,
+            ),
+        )
+
+    if config.enable_ralph_wiggum:
+        _gated_run_stage(
+            "ralph_wiggum",
+            lambda: run_ralph_wiggum_loop(
+                context,
+                run_review=lambda ctx: _run_ralph_wiggum_reviewer(
+                    ctx, config.stages["code_reviewer"], **stage_kwargs
+                ),
+                write_state_file=config.ralph_wiggum_state_file,
+                run_fix=lambda ctx, item: _run_fixer(
+                    ctx, config.stages["fixer"], item, **stage_kwargs
+                ),
+                run_code_review=lambda ctx: _run_code_reviewer(
+                    ctx, config.stages["code_reviewer"], **stage_kwargs
+                ),
+            ),
+        )
 
 
 if __name__ == "__main__":

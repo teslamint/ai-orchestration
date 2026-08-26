@@ -57,6 +57,7 @@
   - `GOOGLE_AI_API_KEY`: Google AI API 키 (`gemini_api`)
   - `OPENAI_API_KEY`: OpenAI API 키 (`openai_api`)
   - `ANTHROPIC_API_KEY`: Anthropic API 키 (`anthropic_api`)
+- 이 릴리스는 POSIX 호스트를 지원합니다. durable run lock에는 `fcntl`을, 시간 초과된 CLI 서브프로세스 정리에는 process group `killpg`를 사용하므로 Windows는 지원하지 않습니다.
 
 ## 설치
 

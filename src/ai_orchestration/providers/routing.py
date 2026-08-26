@@ -67,23 +67,35 @@ def complete_with_fallback(
     primary = http_provider_factory(stage.model)
     try:
         return primary.complete(prompt, **complete_kwargs), stage.model
-    except TransportError:
+    except TransportError as primary_exc:
         # S5: endpoint-level fault. fallback_model shares the dead
         # transport, so skip straight to fallback_binary.
         if stage.fallback_binary is None:
             raise
         cli = cli_provider_factory(stage.fallback_binary)
-        return cli.complete(prompt, **complete_kwargs), stage.fallback_binary
+        try:
+            return cli.complete(prompt, **complete_kwargs), stage.fallback_binary
+        except Exception as fallback_exc:
+            raise ProviderError(
+                f"{stage.model}: {primary_exc}; fallback_binary "
+                f"{stage.fallback_binary}: {fallback_exc}"
+            ) from fallback_exc
     except AuthenticationError:
         # A credential fault is not fixed by another model or a subprocess.
         raise
-    except ProviderError:
+    except ProviderError as primary_exc:
         # S6: model-level fault (429/5xx/unusable output). Retry on the
         # same endpoint via fallback_model if configured; never drop to CLI.
         if stage.fallback_model is None:
             raise
         fallback = http_provider_factory(stage.fallback_model)
-        return fallback.complete(prompt, **complete_kwargs), stage.fallback_model
+        try:
+            return fallback.complete(prompt, **complete_kwargs), stage.fallback_model
+        except Exception as fallback_exc:
+            raise ProviderError(
+                f"{stage.model}: {primary_exc}; fallback_model "
+                f"{stage.fallback_model}: {fallback_exc}"
+            ) from fallback_exc
 
 
 def complete_structured_with_fallback(
@@ -109,21 +121,33 @@ def complete_structured_with_fallback(
             primary.complete_structured(prompt, schema=schema, **complete_kwargs),
             stage.model,
         )
-    except TransportError:
+    except TransportError as primary_exc:
         if stage.fallback_binary is None:
             raise
         cli = cli_provider_factory(stage.fallback_binary)
-        return (
-            cli.complete_structured(prompt, schema=schema, **complete_kwargs),
-            stage.fallback_binary,
-        )
+        try:
+            return (
+                cli.complete_structured(prompt, schema=schema, **complete_kwargs),
+                stage.fallback_binary,
+            )
+        except Exception as fallback_exc:
+            raise ProviderError(
+                f"{stage.model}: {primary_exc}; fallback_binary "
+                f"{stage.fallback_binary}: {fallback_exc}"
+            ) from fallback_exc
     except AuthenticationError:
         raise
-    except ProviderError:
+    except ProviderError as primary_exc:
         if stage.fallback_model is None:
             raise
         fallback = http_provider_factory(stage.fallback_model)
-        return (
-            fallback.complete_structured(prompt, schema=schema, **complete_kwargs),
-            stage.fallback_model,
-        )
+        try:
+            return (
+                fallback.complete_structured(prompt, schema=schema, **complete_kwargs),
+                stage.fallback_model,
+            )
+        except Exception as fallback_exc:
+            raise ProviderError(
+                f"{stage.model}: {primary_exc}; fallback_model "
+                f"{stage.fallback_model}: {fallback_exc}"
+            ) from fallback_exc
