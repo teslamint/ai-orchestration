@@ -200,8 +200,11 @@ def test_executor_claude_selects_cli_provider_and_planner_opus5_selects_proxy(
         calls["cli"].append(binary)
         return _FakeProvider(binary)
 
+    import ai_orchestration.config as config_module
+
     monkeypatch.setattr(cli_module, "_http_provider_factory", spy_http)
     monkeypatch.setattr(cli_module, "_cli_provider_factory", spy_cli)
+    monkeypatch.setattr(config_module, "_default_binary_exists", lambda _name: True)
     monkeypatch.setattr(
         cli_module,
         "_probe_catalog_for_startup",

@@ -92,11 +92,14 @@ def test_run_routes_each_stage(tmp_path, monkeypatch):
         calls["cli"].append(binary)
         return _StubProvider(binary)
 
+    import ai_orchestration.config as config_module
+
     monkeypatch.setattr(cli_module, "_http_provider_factory", http_factory)
     monkeypatch.setattr(cli_module, "_cli_provider_factory", cli_factory)
     monkeypatch.setattr(
         cli_module, "_probe_catalog_for_startup", lambda *a, **k: _reachable_catalog()
     )
+    monkeypatch.setattr(config_module, "_default_binary_exists", lambda _name: True)
 
     result = runner.invoke(
         app,
