@@ -849,7 +849,8 @@ def test_edit_file_task_receives_real_existing_code(tmp_path, monkeypatch):
     assert target.read_text() == "UPDATED_SOURCE_MARKER = True"
 
 
-# Approach selection is deterministic and non-interactive by default.
+# `--auto-select` controls interactive approach selection; headless runs keep
+# the safe deterministic default without creating another approval gate.
 def test_non_tty_approach_selection_uses_default_without_auto_select(
     tmp_path, monkeypatch
 ):
@@ -867,6 +868,31 @@ def test_non_tty_approach_selection_uses_default_without_auto_select(
             "selection_default",
             "--auto-run",
             "--auto-approve",
+            "--skip-review",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+
+def test_tty_approach_selection_uses_prompt_without_auto_select(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _install_reachable_catalog(monkeypatch)
+    monkeypatch.setattr(cli_module, "_is_tty", lambda: True)
+    monkeypatch.setattr(cli_module, "_prompt_choice", lambda: 1, raising=False)
+    monkeypatch.setattr(
+        cli_module.typer,
+        "prompt",
+        lambda *args, **kwargs: 1 if kwargs.get("type") is int else "custom",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "x",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "selection_tty",
             "--skip-review",
         ],
     )

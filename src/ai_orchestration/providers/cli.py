@@ -114,8 +114,9 @@ def _run_cli_subprocess(
     assert process.stdout is not None
     assert process.stderr is not None
     merged_output: list[str] = []
-    stderr_lines: list[str] = []
+    stderr_chunks: list[str] = []
     parsed_chunks: list[str] = []
+    stdout_buffer = ""
     sel = selectors.DefaultSelector()
     sel.register(process.stdout, selectors.EVENT_READ, "stdout")
     sel.register(process.stderr, selectors.EVENT_READ, "stderr")
@@ -160,15 +161,22 @@ def _run_cli_subprocess(
             stream = key.fileobj
             chunk = os.read(stream.fileno(), 65536).decode("utf-8", errors="replace")
             if chunk == "":
+                if parse_stream_json and key.data == "stdout" and stdout_buffer:
+                    parsed_chunks.extend(_extract_stream_json_text(stdout_buffer))
                 sel.unregister(stream)
                 continue
-            for line in chunk.splitlines():
-                last_output = time.monotonic()
-                if key.data == "stderr":
-                    stderr_lines.append(line)
-                    continue
-                merged_output.append(line)
-                if parse_stream_json:
+            if key.data == "stderr":
+                stderr_chunks.append(chunk)
+                continue
+            merged_output.append(chunk)
+            last_output = time.monotonic()
+            if parse_stream_json:
+                stdout_buffer += chunk
+                lines = stdout_buffer.splitlines(keepends=True)
+                stdout_buffer = ""
+                if lines and not lines[-1].endswith(("\n", "\r")):
+                    stdout_buffer = lines.pop()
+                for line in lines:
                     parsed_chunks.extend(_extract_stream_json_text(line))
 
     remaining = (
@@ -181,8 +189,8 @@ def _run_cli_subprocess(
         raise CLIProviderError(
             f"{binary_name}: exceeded timeout of {timeout}s"
         ) from exc
-    stderr_text = "\n".join(stderr_lines)
-    combined = "\n".join(merged_output)
+    stderr_text = "".join(stderr_chunks)
+    combined = "".join(merged_output)
 
     if returncode != 0:
         raise CLIProviderError(

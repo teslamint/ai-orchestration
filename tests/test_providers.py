@@ -799,3 +799,22 @@ def test_run_cli_subprocess_timeout_handles_closed_pipes_with_lingering_child():
             timeout=0.2,
         )
     assert time.monotonic() - start < 0.75
+
+
+def test_run_cli_subprocess_preserves_output_across_read_chunks():
+    import sys
+
+    from ai_orchestration.providers.cli import _run_cli_subprocess
+
+    script = (
+        "import os, time\n"
+        "os.write(1, b'abc')\n"
+        "time.sleep(0.05)\n"
+        "os.write(1, b'def\\n')\n"
+    )
+    assert (
+        _run_cli_subprocess(
+            [sys.executable, "-c", script], binary_name="python", timeout=1
+        )
+        == "abcdef"
+    )

@@ -820,7 +820,16 @@ def _run(
         return typer.prompt("Enter your custom approach")
 
     if "planner" not in run_state.completed_stages:
-        _select_approach(context, auto_select=True)
+        _select_approach(
+            context,
+            auto_select=config.auto_select,
+            prompt_choice=_prompt_choice
+            if _is_tty() and not config.auto_select
+            else None,
+            prompt_custom=_prompt_custom
+            if _is_tty() and not config.auto_select
+            else None,
+        )
     _gated_run_stage(
         "planner",
         lambda: _run_planner(context, config.stages["planner"], **stage_kwargs),
