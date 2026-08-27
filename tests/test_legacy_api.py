@@ -128,28 +128,54 @@ class TestToolTypeAPIValues:
         assert ToolType("anthropic_api") == ToolType.ANTHROPIC_API
 
 
-# --- Missing-key path (edge, never asserted by legacy suite) --------------
+# --- Missing-key path: no live network calls, deliberate error types -------
 
 
 def test_openai_tool_generate_raises_when_key_missing(monkeypatch):
+    from openai import OpenAIError
+
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     tool = OpenAITool()
     assert tool.is_available() is False
-    with pytest.raises(Exception):
+    # The `openai` SDK raises this before opening any socket -- construction
+    # fails fast on missing credentials, so this never reaches the network.
+    with pytest.raises(OpenAIError, match="OPENAI_API_KEY"):
         tool.generate("hello")
 
 
 def test_anthropic_tool_generate_raises_when_key_missing(monkeypatch):
+    pytest.importorskip("anthropic")
+
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     tool = AnthropicTool()
     assert tool.is_available() is False
-    with pytest.raises(Exception):
+    # The `anthropic` SDK validates headers before sending the request, so
+    # this never reaches the network; it raises a bare TypeError, not a
+    # subclass of AnthropicError, which is why the assertion also matches
+    # the message rather than relying on a narrower exception class alone.
+    with pytest.raises(TypeError, match="authentication"):
         tool.generate("hello")
 
 
 def test_google_tool_generate_raises_when_key_missing(monkeypatch):
+    pytest.importorskip("google.generativeai")
+    import google.auth
+    import google.auth.exceptions
+
+    # Without a stub, `google.generativeai` falls back to ambient GCP
+    # Application Default Credentials (if any are configured on the host)
+    # and performs a REAL network call to the Generative Language API. Stub
+    # out credential discovery so the missing-key path is deterministic and
+    # never touches the network, regardless of the host's ADC state.
+    def _no_ambient_credentials(*_args, **_kwargs):
+        raise google.auth.exceptions.DefaultCredentialsError(
+            "no application default credentials (test isolation stub)"
+        )
+
+    monkeypatch.setattr(google.auth, "default", _no_ambient_credentials)
     monkeypatch.delenv("GOOGLE_AI_API_KEY", raising=False)
     tool = GoogleAITool()
     assert tool.is_available() is False
-    with pytest.raises(Exception):
+    with pytest.raises(google.auth.exceptions.DefaultCredentialsError):
         tool.generate("hello")

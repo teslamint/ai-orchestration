@@ -17,7 +17,7 @@ without changing the approved design.
 
 | Row | Command/result | Outcome | Resolution in the plan |
 |---|---|---|---|
-| A1 | `find /Users/teslamint/workspace/compound-loop -maxdepth 2 ( -name pyproject.toml -o -name setup.py -o -name setup.cfg )` produced no package metadata | match to approved contradiction | No path dependency; compound-loop stays Deferred and no bridge is implemented |
+| A1 | `find /Users/teslamint/workspace/compound-loop -maxdepth 2 \( -name pyproject.toml -o -name setup.py -o -name setup.cfg \)` produced no package metadata | match to approved contradiction | No path dependency; compound-loop stays Deferred and no bridge is implemented |
 | A2 | `uv run --with langchain-community python -c 'from langchain_community.chat_models import ChatOpenAI, ChatAnthropic, ChatGoogleGenerativeAI'` raised `ImportError`; the package emitted its sunset warning | match to approved contradiction | No `langchain-community` integration; use the official OpenAI SDK for the proxy and custom CLI providers |
 | A3 | `uv run python -c 'import sys; print(sys.version_info[:2])'` returned `(3, 13)`; the approved PyPI evidence still requires the implementation floor to move to Python 3.10 | match to approved contradiction | Update `requires-python` to `>=3.10` and Ruff target to `py310` |
 | A8 | `uv run python -c 'import httpx'` raised `ModuleNotFoundError` | match to approved contradiction | Add only the OpenAI SDK dependency required by the proxy path; do not assume `httpx` is preinstalled |

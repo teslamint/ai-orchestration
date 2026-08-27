@@ -318,7 +318,12 @@ def test_state_file_json_is_stable_and_readable(tmp_path):
 def test_acquire_run_lock_blocks_second_concurrent_holder(tmp_path):
     from ai_orchestration.engine.state import RunLockedError, acquire_run_lock
 
-    path = tmp_path / "run_state.json"
+    # Nested to match production's `<project>/.ai_orchestration/run_state.json`
+    # layout: `acquire_run_lock` locks `path.parent.parent`, so a bare
+    # `tmp_path / "run_state.json"` would lock `tmp_path.parent` -- the
+    # shared pytest session temp root every other test's `tmp_path` also
+    # lives under -- instead of a directory owned by this test alone.
+    path = tmp_path / "project" / ".ai_orchestration" / "run_state.json"
     with acquire_run_lock(path):
         with pytest.raises(RunLockedError):
             with acquire_run_lock(path):
@@ -328,7 +333,7 @@ def test_acquire_run_lock_blocks_second_concurrent_holder(tmp_path):
 def test_acquire_run_lock_releases_on_exit_for_next_holder(tmp_path):
     from ai_orchestration.engine.state import acquire_run_lock
 
-    path = tmp_path / "run_state.json"
+    path = tmp_path / "project" / ".ai_orchestration" / "run_state.json"
     with acquire_run_lock(path):
         pass
     # Must not raise: the first holder released on context exit.
@@ -339,7 +344,7 @@ def test_acquire_run_lock_releases_on_exit_for_next_holder(tmp_path):
 def test_acquire_run_lock_releases_even_when_body_raises(tmp_path):
     from ai_orchestration.engine.state import acquire_run_lock
 
-    path = tmp_path / "run_state.json"
+    path = tmp_path / "project" / ".ai_orchestration" / "run_state.json"
     with pytest.raises(ValueError):
         with acquire_run_lock(path):
             raise ValueError("boom")
@@ -369,7 +374,7 @@ def test_acquire_run_lock_survives_stray_lock_file_deletion(tmp_path):
     """
     from ai_orchestration.engine.state import RunLockedError, acquire_run_lock
 
-    path = tmp_path / "run_state.json"
+    path = tmp_path / "project" / ".ai_orchestration" / "run_state.json"
     with acquire_run_lock(path):
         stray_lock_file = path.parent / f".{path.name}.lock"
         stray_lock_file.write_text("")
@@ -420,7 +425,7 @@ def test_acquire_run_lock_wraps_non_lock_oserror_as_state_error_and_closes_fd(
     monkeypatch.setattr(fcntl, "flock", _raise_eio)
     monkeypatch.setattr(os, "close", _tracking_close)
 
-    path = tmp_path / "run_state.json"
+    path = tmp_path / "project" / ".ai_orchestration" / "run_state.json"
     with pytest.raises(StateError) as excinfo:
         with _acquire_run_lock(path):
             pass  # pragma: no cover - must not be reached
