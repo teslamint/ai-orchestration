@@ -1,10 +1,13 @@
 """
 AI Orchestration에 사용될 각 LLM 에이전트의 역할(System Prompt)과
 작업 지시(User Prompt)를 정의하는 템플릿 파일입니다.
+
+Ported verbatim from the committed `agent_prompts.py` at `8ee3c4c`: prompt
+text is unchanged (§Scope/Out: "Changing prompt wording" is out of scope).
 """
 
 # -----------------------------------------------------------------------------
-# Stage 1: Gemini (Brainstormer) Prompts
+# Stage 1: Brainstormer Prompts
 # -----------------------------------------------------------------------------
 GEMINI_SYSTEM_PROMPT = """You are a creative and highly experienced technical lead. Your goal is to analyze a user's request and propose several distinct, high-level technical approaches for implementation. You should consider different technologies, architectures, and strategies.
 """
@@ -44,7 +47,7 @@ Present your output in a clear, concise Markdown list format. This output will b
 
 
 # -----------------------------------------------------------------------------
-# Stage 2: Codex (Brainstorming Reviewer) Prompts
+# Stage 2: Brainstorming Reviewer Prompts
 # -----------------------------------------------------------------------------
 CODEX_BRAINSTORM_REVIEWER_SYSTEM_PROMPT = """You are a meticulous technical editor and senior engineer. Your role is to review and refine brainstorming output from another AI. You should:
 1. Clarify ambiguous points
@@ -98,7 +101,7 @@ Return a refined version of the brainstorming in Markdown format:
 
 
 # -----------------------------------------------------------------------------
-# Stage 3: Codex (Planner) Prompts
+# Stage 3: Planner Prompts
 # -----------------------------------------------------------------------------
 CODEX_SYSTEM_PROMPT = """You are a meticulous and pragmatic senior software architect. Your sole responsibility is to convert a selected technical approach into a detailed, step-by-step implementation plan. You must output this plan in a specific JSON format and nothing else.
 """
@@ -111,7 +114,7 @@ CHATGPT_USER_PROMPT_TEMPLATE = """
 {tooling_context}
 
 **Repository Notes:**
-- Helper functions `_extract_json_list` and `_extract_code_content` live in `orchestrator_cli.py`.
+- Helpers `extract_json_list` and `extract_code_content` live in `ai_orchestration.utils.extract`.
 
 **Brainstormed Approaches:**
 {brainstorming_ideas}
@@ -174,7 +177,7 @@ Now, generate the JSON `implementation_plan` for the given user goal and selecte
 
 
 # -----------------------------------------------------------------------------
-# Stage 4: Claude (Executor) Prompts
+# Stage 4: Executor Prompts
 # -----------------------------------------------------------------------------
 CLAUDE_SYSTEM_PROMPT = """You are a highly skilled, focused Python developer who writes clean, production-ready code. Your job is to execute a single, specific instruction from a project plan. You are laconic and to the point.
 """
@@ -202,7 +205,7 @@ Based on the instruction, generate the complete and final source code or content
 
 
 # -----------------------------------------------------------------------------
-# Stage 5: Codex (Code Reviewer) Prompts
+# Stage 5: Code Reviewer Prompts
 # -----------------------------------------------------------------------------
 CODEX_CODE_REVIEWER_SYSTEM_PROMPT = """You are a senior code reviewer with expertise in code quality, security, and best practices. Your role is to:
 1. Review code changes for bugs, security issues, and improvements
@@ -270,7 +273,7 @@ Return a JSON object with the following structure:
 
 
 # -----------------------------------------------------------------------------
-# Stage 6: Claude (Fixer) Prompts
+# Stage 6: Fixer Prompts
 # -----------------------------------------------------------------------------
 CLAUDE_FIXER_SYSTEM_PROMPT = """You are a skilled code fixer who applies code review feedback precisely. You:
 1. Apply fixes exactly as specified in the review
@@ -408,25 +411,3 @@ AGENT_PROMPTS = {
         "user": RALPH_WIGGUM_REVIEWER_USER_PROMPT_TEMPLATE,
     },
 }
-
-if __name__ == "__main__":
-    # Example of how to use the templates
-    print("--- Example: Planner (ChatGPT) Prompt ---")
-
-    planner_prompt = AGENT_PROMPTS["planner"]["user"].format(
-        user_goal="파이썬으로 웹 스크래핑을 해서 CSV 파일로 저장하는 CLI 도구 만들어줘.",
-        brainstorming_ideas="- **Approach 1: Requests + BeautifulSoup**...",
-        selected_approach="Requests + BeautifulSoup",
-    )
-    print(planner_prompt)
-
-    print("\n\n--- Example: Executor (Claude) Prompt ---")
-    executor_prompt = AGENT_PROMPTS["executor"]["user"].format(
-        user_goal="파이썬으로 웹 스크래핑을 해서 CSV 파일로 저장하는 CLI 도구 만들어줘.",
-        step_id=2,
-        action_type="edit_file",
-        file_path="main.py",
-        instruction="Add a function `save_to_csv(data)` that takes a list of dictionaries and saves it to 'output.csv' using the pandas library.",
-        existing_code="import requests\n\nprint('Hello, World!')",
-    )
-    print(executor_prompt)

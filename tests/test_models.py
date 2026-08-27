@@ -1,13 +1,13 @@
-"""Tests for orchestration_context models."""
+"""Characterization tests for ai_orchestration.models.context (U2).
 
-import sys
+Ports every assertion from the legacy tests/test_orchestration_context.py
+verbatim: same enum values, same field defaults, same method behavior. See
+docs/evidence/legacy-successor-inventory.md for the 1:1 name mapping.
+"""
+
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from orchestration_context import (
+from ai_orchestration.models.context import (
     ActionType,
     CodeReviewItem,
     CodeReviewResult,
@@ -107,7 +107,6 @@ def test_orchestration_context_new_fields(tmp_path):
         workspace_path=tmp_path,
     )
 
-    # Default values for new fields
     assert context.refined_brainstorming is None
     assert context.brainstorming_review_notes is None
     assert context.generated_diffs == {}
@@ -123,14 +122,9 @@ def test_orchestration_context_set_new_fields(tmp_path):
         workspace_path=tmp_path,
     )
 
-    # Set Stage 2 data
     context.refined_brainstorming = "Refined approach 1"
     context.brainstorming_review_notes = "Recommended for efficiency"
-
-    # Set Stage 4 diff data
     context.generated_diffs = {"main.py": "+new line\n-old line"}
-
-    # Set Stage 5 data
     context.code_review_result = CodeReviewResult(
         reviewed_at="2024-01-01T00:00:00",
         total_files_reviewed=1,
@@ -138,19 +132,40 @@ def test_orchestration_context_set_new_fields(tmp_path):
         overall_assessment="Clean code",
         requires_fixes=False,
     )
-
-    # Set Stage 6 data
     context.fix_execution_logs = [
         ExecutionLog(step_id=1, success=True, message="Fixed")
     ]
     context.fix_iteration_count = 1
 
-    # Verify
     assert context.refined_brainstorming == "Refined approach 1"
     assert "main.py" in context.generated_diffs
     assert context.code_review_result.requires_fixes is False
     assert len(context.fix_execution_logs) == 1
     assert context.fix_iteration_count == 1
+
+
+def test_context_rejects_task_path_outside_workspace(tmp_path):
+    import pytest
+
+    from ai_orchestration.errors import StateError
+
+    context = OrchestrationContext(
+        project_name="test", user_goal="test", workspace_path=tmp_path
+    )
+    with pytest.raises(StateError, match="outside workspace"):
+        context.resolve_workspace_file(Path("../escape.py"))
+
+
+def test_context_rejects_workspace_root_as_file_target(tmp_path):
+    import pytest
+
+    from ai_orchestration.errors import StateError
+
+    context = OrchestrationContext(
+        project_name="test", user_goal="test", workspace_path=tmp_path
+    )
+    with pytest.raises(StateError, match="file target"):
+        context.resolve_workspace_file(Path("."))
 
 
 def test_task_creation():
@@ -179,7 +194,6 @@ def test_execution_log_creation():
 
 
 def test_review_decision_values():
-    """Test ReviewDecision enum values."""
     assert ReviewDecision.ACCEPTED.value == "accepted"
     assert ReviewDecision.REJECTED.value == "rejected"
     assert ReviewDecision.NEEDS_REVISION.value == "needs_revision"
@@ -187,7 +201,6 @@ def test_review_decision_values():
 
 
 def test_ralph_wiggum_feedback_creation():
-    """Test RalphWiggumFeedback model creation."""
     feedback = RalphWiggumFeedback(
         reviewer_id="test_reviewer",
         decision=ReviewDecision.ACCEPTED,
@@ -204,7 +217,6 @@ def test_ralph_wiggum_feedback_creation():
 
 
 def test_ralph_wiggum_feedback_defaults():
-    """Test RalphWiggumFeedback default values."""
     feedback = RalphWiggumFeedback()
     assert feedback.reviewer_id == "ralph_wiggum"
     assert feedback.decision == ReviewDecision.PENDING
@@ -215,7 +227,6 @@ def test_ralph_wiggum_feedback_defaults():
 
 
 def test_iteration_metadata_creation():
-    """Test IterationMetadata model creation."""
     metadata = IterationMetadata(
         review_attempt=2,
         max_attempts=5,
@@ -227,7 +238,6 @@ def test_iteration_metadata_creation():
 
 
 def test_iteration_metadata_defaults():
-    """Test IterationMetadata default values."""
     metadata = IterationMetadata()
     assert metadata.review_attempt == 1
     assert metadata.max_attempts == 3
@@ -238,7 +248,6 @@ def test_iteration_metadata_defaults():
 
 
 def test_iteration_metadata_increment_attempt():
-    """Test IterationMetadata.increment_attempt method."""
     metadata = IterationMetadata(review_attempt=1, max_attempts=3)
     assert metadata.increment_attempt() is True
     assert metadata.review_attempt == 2
@@ -249,7 +258,6 @@ def test_iteration_metadata_increment_attempt():
 
 
 def test_iteration_metadata_add_note():
-    """Test IterationMetadata.add_note method."""
     metadata = IterationMetadata()
     metadata.add_note("First note")
     metadata.add_note("Second note")
@@ -258,7 +266,6 @@ def test_iteration_metadata_add_note():
 
 
 def test_iteration_metadata_add_history_entry():
-    """Test IterationMetadata.add_history_entry method."""
     metadata = IterationMetadata()
     metadata.add_history_entry({"action": "test", "result": "pass"})
     assert len(metadata.iteration_history) == 1
@@ -266,7 +273,6 @@ def test_iteration_metadata_add_history_entry():
 
 
 def test_orchestration_context_ralph_wiggum_defaults(tmp_path):
-    """Test OrchestrationContext Ralph Wiggum default fields."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -281,7 +287,6 @@ def test_orchestration_context_ralph_wiggum_defaults(tmp_path):
 
 
 def test_orchestration_context_ralph_wiggum_enabled(tmp_path):
-    """Test OrchestrationContext with Ralph Wiggum enabled."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -298,7 +303,6 @@ def test_orchestration_context_ralph_wiggum_enabled(tmp_path):
 
 
 def test_submit_ralph_wiggum_feedback(tmp_path):
-    """Test OrchestrationContext.submit_ralph_wiggum_feedback method."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -321,7 +325,6 @@ def test_submit_ralph_wiggum_feedback(tmp_path):
 
 
 def test_is_ralph_wiggum_accepted_by_decision(tmp_path):
-    """Test OrchestrationContext.is_ralph_wiggum_accepted by decision."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -338,7 +341,6 @@ def test_is_ralph_wiggum_accepted_by_decision(tmp_path):
 
 
 def test_is_ralph_wiggum_accepted_by_threshold(tmp_path):
-    """Test OrchestrationContext.is_ralph_wiggum_accepted by threshold."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -355,7 +357,6 @@ def test_is_ralph_wiggum_accepted_by_threshold(tmp_path):
 
 
 def test_is_ralph_wiggum_accepted_false(tmp_path):
-    """Test OrchestrationContext.is_ralph_wiggum_accepted returns False."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -372,7 +373,6 @@ def test_is_ralph_wiggum_accepted_false(tmp_path):
 
 
 def test_is_ralph_wiggum_accepted_no_feedback(tmp_path):
-    """Test OrchestrationContext.is_ralph_wiggum_accepted with no feedback."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -383,7 +383,6 @@ def test_is_ralph_wiggum_accepted_no_feedback(tmp_path):
 
 
 def test_can_ralph_wiggum_retry(tmp_path):
-    """Test OrchestrationContext.can_ralph_wiggum_retry method."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -398,7 +397,6 @@ def test_can_ralph_wiggum_retry(tmp_path):
 
 
 def test_prepare_ralph_wiggum_retry(tmp_path):
-    """Test OrchestrationContext.prepare_ralph_wiggum_retry method."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -416,7 +414,6 @@ def test_prepare_ralph_wiggum_retry(tmp_path):
 
 
 def test_prepare_ralph_wiggum_retry_at_max(tmp_path):
-    """Test OrchestrationContext.prepare_ralph_wiggum_retry at max attempts."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -428,7 +425,6 @@ def test_prepare_ralph_wiggum_retry_at_max(tmp_path):
 
 
 def test_check_promise_completion(tmp_path):
-    """Test OrchestrationContext.check_promise_completion method."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -448,7 +444,6 @@ def test_check_promise_completion(tmp_path):
 
 
 def test_check_promise_completion_no_promise(tmp_path):
-    """Test OrchestrationContext.check_promise_completion without promise set."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -459,7 +454,6 @@ def test_check_promise_completion_no_promise(tmp_path):
 
 
 def test_save_iteration_snapshot(tmp_path):
-    """Test OrchestrationContext.save_iteration_snapshot method."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -474,7 +468,6 @@ def test_save_iteration_snapshot(tmp_path):
 
 
 def test_add_previous_output(tmp_path):
-    """Test OrchestrationContext.add_previous_output method."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -488,7 +481,6 @@ def test_add_previous_output(tmp_path):
 
 
 def test_get_self_reference_context(tmp_path):
-    """Test OrchestrationContext.get_self_reference_context method."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",
@@ -505,7 +497,6 @@ def test_get_self_reference_context(tmp_path):
 
 
 def test_get_self_reference_context_empty(tmp_path):
-    """Test OrchestrationContext.get_self_reference_context with no outputs."""
     context = OrchestrationContext(
         project_name="TestProject",
         user_goal="Build a test app",

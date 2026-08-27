@@ -1,8 +1,10 @@
-"""API-based LLM tool implementations.
+"""Legacy direct-vendor API tool adapters, ported verbatim from `api_tools.py`.
 
-This module provides API-based alternatives to CLI tools,
-allowing direct HTTP API calls without external CLI dependencies.
+These remain available when an existing tool-config file selects a
+`*_API` value; the new proxy model slots do not reinterpret them.
 """
+
+from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
@@ -27,19 +29,20 @@ class APIBasedTool(ABC):
     @abstractmethod
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> APIResponse:
         """Synchronous generation."""
-        pass
 
     @abstractmethod
     def generate_stream(
         self, prompt: str, system_prompt: Optional[str] = None
     ) -> Iterator[str]:
         """Streaming generation yielding content chunks."""
-        pass
 
     @abstractmethod
     def is_available(self) -> bool:
         """Check if API key is configured."""
-        pass
+
+
+# Public alias matching the U3 Interfaces contract name.
+LegacyAPITool = APIBasedTool
 
 
 class OpenAITool(APIBasedTool):

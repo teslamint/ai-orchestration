@@ -1,3 +1,10 @@
+"""Pydantic context models for the orchestration pipeline.
+
+Ported verbatim from the committed `orchestration_context.py` at `8ee3c4c`:
+identical enum values, field defaults, validators, and method behavior. No
+field name, enum value, or Ralph Wiggum semantic changes.
+"""
+
 from __future__ import annotations
 
 from enum import Enum
@@ -5,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ai_orchestration.errors import StateError
 
 
 class ActionType(str, Enum):
@@ -209,6 +218,10 @@ class OrchestrationContext(BaseModel):
         default_factory=dict,
         description="Stage 4에서 생성된 파일별 diff (파일경로 -> diff 문자열)",
     )
+    completed_executor_task_ids: List[int] = Field(
+        default_factory=list,
+        description="재개 시 건너뛸 성공 완료 executor Task step_id 목록",
+    )
 
     # === Stage 5 Data (Codex - Code Reviewer) ===
     code_review_result: Optional[CodeReviewResult] = Field(
@@ -251,6 +264,17 @@ class OrchestrationContext(BaseModel):
         resolved_path = v.resolve()
         resolved_path.mkdir(parents=True, exist_ok=True)
         return resolved_path
+
+    def resolve_workspace_file(self, path: Path) -> Path:
+        """Resolve a model-supplied file path only within this workspace."""
+        candidate = (self.workspace_path / path).resolve()
+        try:
+            relative_path = candidate.relative_to(self.workspace_path)
+        except ValueError as exc:
+            raise StateError(f"file path {path!s} is outside workspace") from exc
+        if relative_path == Path("."):
+            raise StateError(f"file path {path!s} must name a file target")
+        return candidate
 
     # === Ralph Wiggum Feedback Loop Methods ===
     def submit_ralph_wiggum_feedback(self, feedback: RalphWiggumFeedback) -> None:
@@ -327,78 +351,3 @@ class OrchestrationContext(BaseModel):
         use_enum_values=True,
         arbitrary_types_allowed=True,
     )
-
-
-# ======== 사용 예시 ========
-if __name__ == "__main__":
-    # 1. 초기 컨텍스트 생성 (사용자 입력 기반)
-    initial_context = OrchestrationContext(
-        project_name="MyAwesomeApp",
-        user_goal="파이썬으로 웹 스크래핑을 해서 CSV 파일로 저장하는 CLI 도구 만들어줘.",
-        workspace_path="./workspace/my_awesome_app",
-    )
-    print("--- 1. Initial Context ---")
-    print(initial_context.model_dump_json(indent=2, exclude_none=True))
-
-    # 2. Stage 1 (Gemini) 실행 후 데이터 추가
-    initial_context.brainstorming_ideas = [
-        "Requests와 BeautifulSoup 라이브러리 사용",
-        "Scrapy 프레임워크 사용",
-        "Playwright를 이용한 동적 페이지 스크래핑",
-    ]
-    initial_context.selected_approach = "Requests와 BeautifulSoup 라이브러리 사용"
-    print("\n--- 2. After Stage 1 (Brainstorming) ---")
-    print(initial_context.model_dump_json(indent=2, exclude_none=True))
-
-    # 3. Stage 2 (ChatGPT) 실행 후 데이터 추가
-    plan = [
-        Task(
-            step_id=1,
-            file_path=Path("main.py"),
-            action_type=ActionType.CREATE_FILE,
-            instruction="requests와 beautifulsoup4, pandas를 import하고, 특정 URL에서 데이터를 스크래핑하여 DataFrame으로 만드는 기본 코드를 작성해줘.",
-        ),
-        Task(
-            step_id=2,
-            file_path=Path("main.py"),
-            action_type=ActionType.EDIT_FILE,
-            instruction="스크래핑한 DataFrame을 'output.csv' 파일로 저장하는 기능을 추가해줘.",
-        ),
-        Task(
-            step_id=3,
-            file_path=Path("requirements.txt"),
-            action_type=ActionType.CREATE_FILE,
-            instruction="프로젝트에 필요한 라이브러리 (requests, beautifulsoup4, pandas)를 requirements.txt 파일에 기록해줘.",
-        ),
-        Task(
-            step_id=4,
-            file_path=Path("."),
-            action_type=ActionType.RUN_COMMAND,
-            instruction="pip install -r requirements.txt",
-        ),
-    ]
-    initial_context.implementation_plan = plan
-    print("\n--- 3. After Stage 2 (Planning) ---")
-    print(initial_context.model_dump_json(indent=2, exclude_none=True))
-
-    # 4. Stage 3 (Claude) 실행 후 데이터 추가
-    logs = [
-        ExecutionLog(step_id=1, success=True, message="main.py 파일 생성 완료"),
-        ExecutionLog(step_id=2, success=True, message="CSV 저장 기능 추가 완료"),
-        ExecutionLog(
-            step_id=3, success=False, message="파일 생성 실패: 권한 문제 발생"
-        ),
-        ExecutionLog(
-            step_id=4,
-            success=True,
-            message="명령 실행 완료",
-            output="Successfully installed requests beautifulsoup4 pandas",
-        ),
-    ]
-    initial_context.execution_logs = logs
-    print("\n--- 4. After Stage 3 (Execution) ---")
-    print(initial_context.model_dump_json(indent=2, exclude_none=True))
-
-    # 최종 결과 확인
-    print("\n--- Final Orchestration Context Object ---")
-    print(initial_context)
