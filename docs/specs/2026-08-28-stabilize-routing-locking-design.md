@@ -1,6 +1,6 @@
 ---
 title: Stabilize Legacy API Routing and Live Run Locking
-status: draft
+status: approved
 date: 2026-08-28
 schema: spec/v1
 ---
@@ -230,8 +230,8 @@ A usable artifact scores at least 8 of 10. No dimension can score zero.
 9. Cost and latency remain bounded.
    - **Measured by**: candidate median latency stays within 25 percent of comparable baseline pairs, or a USER approves the recorded exception. Cost uses the same gate only for paired `C1-E` trials with reported usage and a pinned price snapshot; otherwise `cost_status` is `not_measurable`.
 
-## Open Decisions
+## Decisions and Remaining Approval
 
-- The USER approves or rejects Approach A at the Design gate.
+- The USER approved Approach A at the Design gate on 2026-08-28.
 - The USER must approve the exact external-model payload and destinations before live dogfooding resumes.
 - Cycle 1 is tracked by `teslamint/ai-orchestration#3`. Cycles 2 through 5 are tracked by `teslamint/compound-loop#28` and `teslamint/ai-orchestration#4` through `#6`.
