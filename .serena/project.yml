@@ -150,7 +150,7 @@ ls_workspace_folders:
 # symbols and references across package boundaries, but these folders are not indexed by Serena,
 # i.e. the respective symbols will not be found using Serena's symbol search tools.
 # Example:
-#   additional_workspace_folders:
+#   ls_additional_workspace_folders:
 #     - ../sibling-package
 #     - ../shared-lib
 ls_additional_workspace_folders: []
