@@ -19,7 +19,7 @@
 - `ai-orchestration "<goal>" --project-name <name>` - 프로젝트명 지정
 - `ai-orchestration "<goal>" --auto-select --auto-run --auto-approve --auto-fix` - 완전 자동화
 - `ai-orchestration "<goal>" --skip-review` - 코드 리뷰 생략
-- `ai-orchestration "<goal>" --planner claude --reviewer claude --code-reviewer claude` - CLI 서브프로세스로만 실행
+- `ai-orchestration "<goal>" --brainstormer claude --planner claude --reviewer claude --executor claude --code-reviewer claude --fixer claude` - 모든 stage를 CLI 서브프로세스로 실행
 - `ai-orchestration "<goal>" --tool-config ./my_tools.json` - 설정 파일 사용 (모델/fallback_model/fallback_binary 포함)
 - `ai-orchestration "<goal>" --resume` - 중단된 실행 재개 (기본값은 항상 새로 시작)
 - `uv run pytest -v` - 테스트 실행
