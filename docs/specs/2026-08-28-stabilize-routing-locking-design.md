@@ -234,4 +234,4 @@ A usable artifact scores at least 8 of 10. No dimension can score zero.
 
 - The USER approves or rejects Approach A at the Design gate.
 - The USER must approve the exact external-model payload and destinations before live dogfooding resumes.
-- GitHub issue numbers remain pending until the current device authentication completes.
+- Cycle 1 is tracked by `teslamint/ai-orchestration#3`. Cycles 2 through 5 are tracked by `teslamint/compound-loop#28` and `teslamint/ai-orchestration#4` through `#6`.
