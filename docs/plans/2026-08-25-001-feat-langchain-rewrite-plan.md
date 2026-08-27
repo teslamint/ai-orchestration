@@ -2,7 +2,8 @@
 schema: plan/v1
 title: Implement the Multi-model Agent Orchestration Rewrite
 type: feat
-status: approved
+status: done
+completed_by: 354536233d259aac8099bd8bf8837f350e06b987
 date: 2026-08-25
 execution: code
 origin: docs/specs/2026-08-24-orchestration-rewrite-design-v2.md
