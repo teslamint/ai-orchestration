@@ -6,6 +6,8 @@ failures skip fallback_model entirely, which retry it, and which never fall
 back at all.
 """
 
+import json
+
 import httpx
 import pytest
 from pydantic import BaseModel
@@ -396,6 +398,46 @@ def test_http_provider_structured_does_not_retry_other_status_failures(monkeypat
         provider.complete_structured("prompt", schema=_Plan)
 
     assert len(calls) == 1
+
+
+def test_http_provider_retry_without_response_format_converts_malformed_json(
+    monkeypatch,
+):
+    """CodeRabbit re-review: the response_format-retry path must keep
+    json.JSONDecodeError inside the typed ProviderError taxonomy so
+    fallback_model routing still runs."""
+    from types import SimpleNamespace
+
+    from openai import APIStatusError
+
+    calls = []
+
+    class _Completions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                response = httpx.Response(
+                    400, request=httpx.Request("POST", "http://stub")
+                )
+                raise APIStatusError(
+                    "response_format is not supported",
+                    response=response,
+                    body={"error": {"message": "response_format is not supported"}},
+                )
+            raise json.JSONDecodeError("bad body", "{invalid", 0)
+
+    class _StubOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=_Completions())
+
+    import ai_orchestration.providers.http as http_module
+
+    monkeypatch.setattr(http_module, "OpenAI", _StubOpenAI)
+    provider = HttpProvider(model="gpt-5.5", base_url="http://stub/v1", api_key="k")
+
+    with pytest.raises(ModelFaultError, match="malformed JSON response body"):
+        provider.complete_structured("prompt", schema=_Plan)
+    assert len(calls) == 2
 
 
 # --- HTTP 200 + malformed JSON body (finding #6) ----------------------------

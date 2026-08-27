@@ -163,6 +163,10 @@ class HttpProvider:
                 ) from retry_exc
             except APIStatusError as retry_exc:
                 self._raise_for_status(retry_exc)
+            except json.JSONDecodeError as retry_exc:
+                raise ModelFaultError(
+                    f"{self.model}: malformed JSON response body ({retry_exc})"
+                ) from retry_exc
         except json.JSONDecodeError as exc:
             raise ModelFaultError(
                 f"{self.model}: malformed JSON response body ({exc})"
