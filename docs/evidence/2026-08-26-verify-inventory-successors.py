@@ -38,6 +38,18 @@ def _collect_node_ids(*paths: str) -> set[str]:
         text=True,
         cwd=REPO_ROOT,
     )
+    missing_paths = [p for p in paths if not (REPO_ROOT / p).exists()]
+    if result.returncode != 0 and missing_paths:
+        # Missing paths mean the legacy suites were deleted in the cutover;
+        # treat that as the documented post-cutover skip, not a failure.
+        return set()
+    if result.returncode != 0:
+        raise RuntimeError(
+            "pytest --collect-only failed for "
+            + ", ".join(paths)
+            + ":\n"
+            + result.stderr.strip()
+        )
     ids = set()
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -103,4 +115,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except RuntimeError as exc:
+        print("INVENTORY VERIFICATION FAILED:", exc)
+        sys.exit(1)
