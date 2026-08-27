@@ -114,6 +114,28 @@ def test_executor_self_healing_non_python_file_skips_syntax_check(tmp_path):
     assert result.success is True
 
 
+def test_executor_self_healing_run_command_task_skips_file_target_validation(
+    tmp_path,
+):
+    # Regression: RUN_COMMAND tasks carry file_path='.' (the workspace
+    # itself, per prompts/stages.py) and must not be routed through
+    # resolve_workspace_file's file-target validation, which rejects the
+    # workspace root. Only CREATE_FILE/EDIT_FILE tasks read/write a file.
+    from ai_orchestration.engine.loops import run_executor_self_healing
+
+    task = Task(
+        step_id=4,
+        file_path=Path("."),
+        action_type=ActionType.RUN_COMMAND,
+        instruction="echo hi",
+    )
+    context = _context(tmp_path)
+    result = run_executor_self_healing(
+        context, task, complete=lambda p: "irrelevant output", max_retries=0
+    )
+    assert result.success is True
+
+
 # --- Main Stage 5->6 review-fix loop -----------------------------------------
 
 

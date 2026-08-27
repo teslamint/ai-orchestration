@@ -50,13 +50,14 @@ def run_executor_self_healing(
     `max_retries` additional attempts before giving up. Non-Python files
     skip the syntax check entirely.
     """
-    target_path = context.resolve_workspace_file(task.file_path)
     existing_code = ""
-    if target_path.exists():
-        try:
-            existing_code = target_path.read_text(encoding="utf-8")
-        except Exception:
-            pass
+    if task.action_type in (ActionType.CREATE_FILE, ActionType.EDIT_FILE):
+        target_path = context.resolve_workspace_file(task.file_path)
+        if target_path.exists():
+            try:
+                existing_code = target_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
 
     prompt = task.instruction
     for attempt in range(max_retries + 1):

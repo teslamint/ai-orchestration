@@ -231,6 +231,13 @@ class BaseCLIProvider:
 
     _binary_name: str = ""
 
+    # Only providers whose `debug=True` build_command actually requests a
+    # stream-JSON output format (currently Claude's `--output-format
+    # stream-json`) may parse stdout as stream-JSON events. Agy and Codex's
+    # debug builds still emit ordinary text, so running the stream-JSON
+    # extractor on their output would silently drop every non-JSON line.
+    _debug_uses_stream_json: bool = False
+
     def get_binary_path(self) -> str:
         return shutil.which(self._binary_name) or self._binary_name
 
@@ -257,7 +264,10 @@ class BaseCLIProvider:
         subprocess path -- it only tells `build_command` to request the
         CLI's stream-JSON output format where supported, so this parses
         that format back into plain text; timeout/descendant cleanup never
-        depends on it.
+        depends on it. Stream-JSON parsing only activates when both
+        `debug` is set AND this provider's debug command actually requests
+        stream-JSON output (`_debug_uses_stream_json`); otherwise ordinary
+        debug text output is returned unparsed.
         """
         if system:
             prompt = f"{system}\n\n{prompt}"
@@ -267,7 +277,7 @@ class BaseCLIProvider:
             binary_name=self._binary_name,
             timeout=timeout,
             on_heartbeat=on_heartbeat,
-            parse_stream_json=debug,
+            parse_stream_json=debug and self._debug_uses_stream_json,
         )
 
     def complete_structured(
@@ -381,6 +391,7 @@ class ClaudeProvider(BaseCLIProvider):
     """Claude CLI provider."""
 
     _binary_name = "claude"
+    _debug_uses_stream_json = True
 
     def build_command(self, prompt: str, debug: bool = False) -> list[str]:
         cmd = [
@@ -465,8 +476,10 @@ class LLMToolFactory:
         return tool_class()
 
     @classmethod
-    def get_tool_for_stage(cls, config: LLMToolConfig, stage) -> BaseCLIProvider:
+    def get_tool_for_stage(cls, config: LLMToolConfig, stage):
         tool_type = config.get_tool_for_stage(stage)
+        if cls.is_api_tool(tool_type):
+            return cls.create_api_tool(tool_type)
         return cls.create(tool_type)
 
 
@@ -537,6 +550,14 @@ def validate_tool_config(config: LLMToolConfig) -> list[str]:
     }
 
     for tool_type in used_tools:
+        if LLMToolFactory.is_api_tool(tool_type):
+            api_tool = LLMToolFactory.create_api_tool(tool_type)
+            if not api_tool.is_available():
+                warnings.append(
+                    f"Tool '{tool_type.value}' API key not configured. "
+                    f"Set the corresponding environment variable before running."
+                )
+            continue
         tool = LLMToolFactory.create(tool_type)
         if not tool.is_available():
             warnings.append(

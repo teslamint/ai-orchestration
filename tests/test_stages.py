@@ -282,12 +282,10 @@ def test_command_executor_has_finite_default_timeout(tmp_path):
 def test_command_executor_timeout_expired_records_failed_attempt(tmp_path, monkeypatch):
     import subprocess
 
-    import ai_orchestration.engine.stages as stages_module
+    def _raise_timeout(self, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="sleep 100", timeout=kwargs.get("timeout"))
 
-    def _raise_timeout(command_args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=command_args, timeout=kwargs["timeout"])
-
-    monkeypatch.setattr(stages_module.subprocess, "run", _raise_timeout)
+    monkeypatch.setattr(subprocess.Popen, "communicate", _raise_timeout)
     executor = CommandExecutor(
         auto_approve=True, log_directory=tmp_path, retries=0, timeout=5
     )
@@ -298,19 +296,69 @@ def test_command_executor_timeout_expired_records_failed_attempt(tmp_path, monke
     assert "timed out" in logs[0].stderr.lower()
 
 
-def test_command_executor_passes_configured_timeout_to_subprocess_run(
+def test_command_executor_passes_configured_timeout_to_subprocess_communicate(
     tmp_path, monkeypatch
 ):
-    import ai_orchestration.engine.stages as stages_module
+    import subprocess
 
     captured = {}
-    real_run = stages_module.subprocess.run
+    real_communicate = subprocess.Popen.communicate
 
-    def _capturing_run(command_args, **kwargs):
+    def _capturing_communicate(self, *args, **kwargs):
         captured["timeout"] = kwargs.get("timeout")
-        return real_run(command_args, **kwargs)
+        return real_communicate(self, *args, **kwargs)
 
-    monkeypatch.setattr(stages_module.subprocess, "run", _capturing_run)
+    monkeypatch.setattr(subprocess.Popen, "communicate", _capturing_communicate)
     executor = CommandExecutor(auto_approve=True, log_directory=tmp_path, timeout=42)
     executor.run("echo hi")
     assert captured["timeout"] == 42
+
+
+def test_command_executor_timeout_kills_entire_process_group(tmp_path):
+    # Mutation-guarded, real-subprocess regression (mirrors
+    # test_providers.py's process-group timeout-kill tests for the CLI
+    # provider): `subprocess.run(..., timeout=...)`'s stdlib TimeoutExpired
+    # handler only kills the immediate child. A descendant that forks off
+    # and inherits the child's stdout/stderr pipes keeps those pipes open
+    # and keeps running after the timeout fires, unless the whole process
+    # group is killed. Before the fix: `run()` still returns at the
+    # configured timeout, but the descendant survives and keeps writing to
+    # the marker file. After the fix: the descendant is dead within a
+    # fraction of a second of the timeout firing.
+    import sys
+    import time
+
+    marker = tmp_path / "marker.txt"
+    child_script = tmp_path / "child.py"
+    child_script.write_text(
+        "import time\n"
+        f"marker = {str(marker)!r}\n"
+        "while True:\n"
+        "    open(marker, 'a').write(str(time.time()))\n"
+        "    time.sleep(0.05)\n"
+    )
+    parent_script = tmp_path / "parent.py"
+    parent_script.write_text(
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(child_script)!r}])\n"
+        "time.sleep(30)\n"
+    )
+
+    executor = CommandExecutor(
+        auto_approve=True,
+        log_directory=tmp_path / "logs",
+        timeout=0.5,
+        retries=0,
+    )
+    success, output, logs = executor.run(f"{sys.executable} {parent_script}")
+    assert success is False
+    assert "timed out" in logs[0].stderr.lower()
+
+    time.sleep(0.3)
+    size_after_kill = marker.stat().st_size if marker.exists() else 0
+    time.sleep(0.3)
+    size_later = marker.stat().st_size if marker.exists() else 0
+    assert size_after_kill == size_later, (
+        "descendant process kept writing after the timeout kill: "
+        "the process group was not terminated"
+    )

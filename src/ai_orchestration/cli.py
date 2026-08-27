@@ -330,6 +330,11 @@ def _run_planner(context: OrchestrationContext, stage: StageConfig, **d) -> None
             raise StateError(f"planner returned duplicate task step_id {task.step_id}")
         step_ids.add(task.step_id)
         tasks.append(task)
+    if json_plan and not tasks:
+        raise StateError(
+            "planner returned a non-empty plan but no valid tasks: "
+            "every item failed Task validation"
+        )
     context.implementation_plan = tasks
 
 

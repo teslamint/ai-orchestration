@@ -1342,6 +1342,27 @@ def test_planner_rejects_duplicate_task_step_ids(monkeypatch, tmp_path):
         cli_module._run_planner(context, cli_module.StageConfig(model="gpt-5.5"))
 
 
+def test_planner_rejects_plan_where_every_item_fails_validation(monkeypatch, tmp_path):
+    context = cli_module.OrchestrationContext(
+        project_name="all_malformed", user_goal="x", workspace_path=tmp_path
+    )
+    # Every item is missing required Task fields (file_path, action_type,
+    # instruction), so all fail Task validation. A non-empty extracted plan
+    # must not silently collapse into an empty implementation_plan.
+    response = json.dumps(
+        [
+            {"step_id": 1},
+            {"not_a_task_field": "whatever"},
+        ]
+    )
+    monkeypatch.setattr(
+        cli_module, "_complete_stage_text", lambda *args, **kwargs: response
+    )
+
+    with pytest.raises(cli_module.StateError, match="no valid tasks"):
+        cli_module._run_planner(context, cli_module.StageConfig(model="gpt-5.5"))
+
+
 def test_resume_rejects_completed_state_missing_context(tmp_path, monkeypatch):
     _install_fakes(monkeypatch)
     _install_reachable_catalog(monkeypatch)

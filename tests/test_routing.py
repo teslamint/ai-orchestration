@@ -313,6 +313,91 @@ def test_complete_structured_with_fallback_binary_model_uses_cli_complete_struct
     assert provider_used == "codex"
 
 
+def test_http_provider_structured_retries_without_response_format_when_unsupported(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from openai import APIStatusError
+
+    calls = []
+
+    class _Completions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                response = httpx.Response(
+                    400, request=httpx.Request("POST", "http://stub")
+                )
+                raise APIStatusError(
+                    "response_format is not supported",
+                    response=response,
+                    body={"error": {"message": "response_format is not supported"}},
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(message=SimpleNamespace(content='{"step_id": 7}'))
+                ]
+            )
+
+    class _StubOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=_Completions())
+
+    import ai_orchestration.providers.http as http_module
+
+    monkeypatch.setattr(http_module, "OpenAI", _StubOpenAI)
+    provider = HttpProvider(model="gpt-5.5", base_url="http://stub/v1", api_key="k")
+
+    result = provider.complete_structured("prompt", system="system", schema=_Plan)
+
+    assert result == _Plan(step_id=7)
+    assert len(calls) == 2
+    assert calls[0]["model"] == calls[1]["model"] == "gpt-5.5"
+    assert (
+        calls[0]["messages"]
+        == calls[1]["messages"]
+        == [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "prompt"},
+        ]
+    )
+    assert "response_format" in calls[0]
+    assert "response_format" not in calls[1]
+
+
+def test_http_provider_structured_does_not_retry_other_status_failures(monkeypatch):
+    from openai import APIStatusError
+
+    calls = []
+
+    class _Completions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            response = httpx.Response(400, request=httpx.Request("POST", "http://stub"))
+            raise APIStatusError(
+                "invalid request",
+                response=response,
+                body={"error": {"message": "invalid request"}},
+            )
+
+    class _StubOpenAI:
+        def __init__(self, **kwargs):
+            from types import SimpleNamespace
+
+            self.chat = SimpleNamespace(completions=_Completions())
+
+    import ai_orchestration.providers.http as http_module
+
+    monkeypatch.setattr(http_module, "OpenAI", _StubOpenAI)
+    provider = HttpProvider(model="gpt-5.5", base_url="http://stub/v1", api_key="k")
+
+    with pytest.raises(ModelFaultError):
+        provider.complete_structured("prompt", schema=_Plan)
+
+    assert len(calls) == 1
+
+
 # --- HTTP 200 + malformed JSON body (finding #6) ----------------------------
 
 

@@ -261,6 +261,50 @@ def test_create_claude_provider():
     assert isinstance(provider, ClaudeProvider)
 
 
+# --- Legacy *_API ToolType support (CodeRabbit PR #2) -----------------------
+
+
+def test_get_tool_for_stage_constructs_api_adapter_for_legacy_api_tool_type():
+    # error: before the fix, LLMToolFactory.create only recognizes CLI tool
+    # types, so a legacy config selecting a `*_API` value raised
+    # `ValueError: Unknown tool type` instead of constructing the API
+    # adapter LLMToolFactory.create_api_tool already knows how to build.
+    from ai_orchestration.providers.legacy_api import OpenAITool
+
+    config = LLMToolConfig(brainstormer=ToolType.OPENAI_API)
+    tool = LLMToolFactory.get_tool_for_stage(config, StageRole.BRAINSTORMER)
+    assert isinstance(tool, OpenAITool)
+
+
+def test_get_tool_for_stage_still_constructs_cli_provider_for_cli_tool_type():
+    config = LLMToolConfig(brainstormer=ToolType.AGY)
+    tool = LLMToolFactory.get_tool_for_stage(config, StageRole.BRAINSTORMER)
+    assert isinstance(tool, AgyProvider)
+
+
+def test_validate_tool_config_accepts_legacy_api_tool_types_without_raising(
+    monkeypatch,
+):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config = LLMToolConfig(brainstormer=ToolType.OPENAI_API)
+    warnings = validate_tool_config(config)
+    assert isinstance(warnings, list)
+
+
+def test_validate_tool_config_never_reports_path_warning_for_api_tool_types(
+    monkeypatch,
+):
+    # error: a `*_API` tool has no binary on PATH by definition; the generic
+    # "not found in PATH" CLI warning is the wrong diagnostic for a missing
+    # API key and must not be emitted for it.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config = LLMToolConfig(brainstormer=ToolType.OPENAI_API)
+    warnings = validate_tool_config(config)
+    api_warnings = [w for w in warnings if "openai_api" in w]
+    assert api_warnings
+    assert all("not found in PATH" not in w for w in api_warnings)
+
+
 # --- LLMToolConfig / brainstormer defaults to AGY ----------------------------
 
 
@@ -656,17 +700,17 @@ def test_base_cli_provider_complete_passes_default_timeout_to_run_cli_subprocess
 # --- _run_cli_subprocess real production usage (finding #15) --------------
 
 
-def test_base_cli_provider_complete_debug_routes_through_run_cli_subprocess(
+def test_claude_provider_complete_debug_routes_through_run_cli_subprocess(
     monkeypatch,
 ):
     # error: before the fix, debug=True still went through plain
     # subprocess.run, so _run_cli_subprocess (heartbeat/stream-JSON) had no
-    # production caller. Assert the debug path actually reaches it by
-    # observing stream-JSON extraction behavior only _run_cli_subprocess
-    # implements.
+    # production caller. Claude's debug build_command actually requests
+    # `--output-format stream-json` (the only provider that does), so its
+    # debug path is the one that must observe stream-JSON extraction.
     import sys
 
-    provider = CodexProvider()
+    provider = ClaudeProvider()
     monkeypatch.setattr(provider, "_binary_name", "python3")
     monkeypatch.setattr(
         provider,
@@ -679,6 +723,49 @@ def test_base_cli_provider_complete_debug_routes_through_run_cli_subprocess(
     )
     result = provider.complete("hello", debug=True)
     assert result == "stream json text"
+
+
+def test_codex_provider_complete_debug_preserves_plain_text_output(monkeypatch):
+    # error: Codex's debug build_command does not request stream-JSON output
+    # (see test_codex_provider_build_command_debug), so
+    # BaseCLIProvider.complete must not run stream-JSON extraction on its
+    # ordinary debug text -- doing so drops every line that fails to parse
+    # as JSON, silently returning "" instead of the real output.
+    import sys
+
+    provider = CodexProvider()
+    monkeypatch.setattr(provider, "_binary_name", "python3")
+    monkeypatch.setattr(
+        provider,
+        "build_command",
+        lambda prompt, debug=False: [
+            sys.executable,
+            "-c",
+            "print('ordinary codex debug output')",
+        ],
+    )
+    result = provider.complete("hello", debug=True)
+    assert result == "ordinary codex debug output"
+
+
+def test_agy_provider_complete_debug_preserves_plain_text_output(monkeypatch):
+    # error: same class of bug as Codex -- agy's debug build_command does
+    # not request stream-JSON output either.
+    import sys
+
+    provider = AgyProvider()
+    monkeypatch.setattr(provider, "_binary_name", "python3")
+    monkeypatch.setattr(
+        provider,
+        "build_command",
+        lambda prompt, debug=False: [
+            sys.executable,
+            "-c",
+            "print('ordinary agy debug output')",
+        ],
+    )
+    result = provider.complete("hello", debug=True)
+    assert result == "ordinary agy debug output"
 
 
 # --- stderr-fill deadlock guard (finding #16) -------------------------------

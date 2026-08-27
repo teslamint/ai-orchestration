@@ -144,7 +144,25 @@ class HttpProvider:
         except (APIConnectionError, httpx.ConnectError, httpx.TimeoutException) as exc:
             raise TransportError(f"{self.model}: endpoint unreachable ({exc})") from exc
         except APIStatusError as exc:
-            self._raise_for_status(exc)
+            if not self._response_format_unsupported(exc):
+                self._raise_for_status(exc)
+            try:
+                # Some OpenAI-compatible proxies reject structured-output
+                # requests while accepting the same prompt as plain text.
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                )
+            except (
+                APIConnectionError,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+            ) as retry_exc:
+                raise TransportError(
+                    f"{self.model}: endpoint unreachable ({retry_exc})"
+                ) from retry_exc
+            except APIStatusError as retry_exc:
+                self._raise_for_status(retry_exc)
         except json.JSONDecodeError as exc:
             raise ModelFaultError(
                 f"{self.model}: malformed JSON response body ({exc})"
@@ -174,6 +192,20 @@ class HttpProvider:
             raise ModelFaultError(
                 f"{self.model}: extracted JSON failed schema validation ({exc})"
             ) from exc
+
+    @staticmethod
+    def _response_format_unsupported(exc: APIStatusError) -> bool:
+        """Recognize only proxy errors specifically rejecting response_format."""
+        if exc.status_code != 400:
+            return False
+        detail = str(exc).lower()
+        body = getattr(exc, "body", None)
+        if body is not None:
+            detail = f"{detail} {body}".lower()
+        return "response_format" in detail and any(
+            marker in detail
+            for marker in ("unsupported", "not supported", "does not support")
+        )
 
     def _raise_for_status(self, exc: APIStatusError):
         status = exc.status_code

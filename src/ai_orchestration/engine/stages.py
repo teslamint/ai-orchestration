@@ -12,8 +12,10 @@ finite subprocess timeout (§Failure classes: "exceeds the stage timeout").
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -101,6 +103,25 @@ def _confirm(prompt: str) -> bool:
     return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
 
 
+def _kill_process_group(process: "subprocess.Popen[str]") -> None:
+    """Kill `process`'s entire process session/group, not just the child.
+
+    Matches `providers/cli.py`'s `_kill_process_group`: `process` was
+    started with `start_new_session=True`, so its pid is also its process
+    group id. Killing only the immediate child on timeout lets a
+    descendant that forked off and inherited the same stdout/stderr pipes
+    outlive the timeout and keep running.
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 @dataclass
 class CommandExecutionLog:
     """Structured log entry for a single command execution attempt."""
@@ -136,10 +157,14 @@ class CommandExecutor:
 
     Ported verbatim from `orchestrator_cli.py`'s `CommandExecutor`:
     `retries=1` means two total attempts (`1 + retries`), both recorded in
-    the JSON audit log. `timeout` bounds each attempt's `subprocess.run`
-    call so a hung command cannot stall the run indefinitely; a
-    `subprocess.TimeoutExpired` is recorded as a failed attempt like any
-    other command-execution error.
+    the JSON audit log. `timeout` bounds each attempt so a hung command
+    cannot stall the run indefinitely. Each attempt runs in its own process
+    session (`start_new_session=True`, matching the CLI-provider pattern in
+    `providers/cli.py:_run_cli_subprocess`), so a timeout kills the whole
+    process group via `os.killpg`, not just the immediate child -- a
+    descendant that forks off and inherits the child's stdout/stderr pipes
+    cannot outlive the timeout and hold those pipes open. A timeout is
+    recorded as a failed attempt like any other command-execution error.
     """
 
     auto_approve: bool = False
@@ -215,22 +240,28 @@ class CommandExecutor:
             start_time = time.monotonic()
             try:
                 command_args = shlex.split(command)
-                result = subprocess.run(
+                process = subprocess.Popen(
                     command_args,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
                     cwd=cwd,
-                    timeout=self.timeout,
+                    start_new_session=True,
                 )
+                try:
+                    stdout, stderr = process.communicate(timeout=self.timeout)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(process)
+                    raise
                 duration_ms = int((time.monotonic() - start_time) * 1000)
                 log_entry = CommandExecutionLog(
                     timestamp=timestamp,
                     command=command,
                     cwd=cwd,
-                    exit_code=result.returncode,
-                    stdout=result.stdout,
-                    stderr=result.stderr,
+                    exit_code=process.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
                     duration_ms=duration_ms,
                     attempt=attempt + 1,
                 )
@@ -245,15 +276,14 @@ class CommandExecutor:
                         "duration_ms": log_entry.duration_ms,
                     }
                 )
-                if result.returncode == 0:
+                if process.returncode == 0:
                     final_status = "success"
-                    final_exit_code = result.returncode
-                    final_output = result.stdout.strip()
+                    final_exit_code = process.returncode
+                    final_output = stdout.strip()
                     break
-                final_exit_code = result.returncode
+                final_exit_code = process.returncode
                 final_output = (
-                    f"Command failed with exit code {result.returncode}: "
-                    f"{result.stderr}"
+                    f"Command failed with exit code {process.returncode}: {stderr}"
                 )
             except subprocess.TimeoutExpired:
                 duration_ms = int((time.monotonic() - start_time) * 1000)
