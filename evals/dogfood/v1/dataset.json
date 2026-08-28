@@ -1,0 +1,30 @@
+{
+  "version": "dogfood/v1",
+  "environment_fingerprint": [
+    "build_commit",
+    "provider_config_sha256",
+    "contract_sha256",
+    "python_version",
+    "platform"
+  ],
+  "tasks": [
+    {
+      "task_id": "C1-R",
+      "trial_ids": ["01", "02", "03"],
+      "expected_terminal": "observed",
+      "description": "Observe reserved and proxy routing without network access."
+    },
+    {
+      "task_id": "C1-L",
+      "trial_ids": ["01", "02", "03"],
+      "expected_terminal": "excluded",
+      "description": "Prove process lock exclusion, release, and resume."
+    },
+    {
+      "task_id": "C1-E",
+      "trial_ids": ["01", "02", "03"],
+      "expected_terminal": "success",
+      "description": "Produce one bounded artifact for blinded quality scoring."
+    }
+  ]
+}

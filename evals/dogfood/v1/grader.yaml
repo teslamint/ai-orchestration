@@ -1,0 +1,14 @@
+{
+  "version": "grader/v1",
+  "dimensions": [
+    "requirement_coverage",
+    "executable_correctness",
+    "test_quality",
+    "maintainability",
+    "evidence_clarity"
+  ],
+  "score_range": [0, 2],
+  "usable_score": 8,
+  "require_no_zero": true,
+  "max_latency_ratio": 1.25
+}
