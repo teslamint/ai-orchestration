@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -353,7 +354,9 @@ def test_cli_local_writes_private_output_and_rejects_symlinked_root(tmp_path):
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": "src"}
     result = subprocess.run(command, text=True, capture_output=True, env=env)
     assert result.returncode == 0
-    assert validate_result(output)["task_id"] == "C1-R"
+    local_result = validate_result(output)
+    assert local_result["task_id"] == "C1-R"
+    assert local_result["provider_config_sha256"] == hashlib.sha256(b"{}").hexdigest()
     assert output.stat().st_mode & 0o777 == 0o600
 
     real_root = tmp_path / "real"

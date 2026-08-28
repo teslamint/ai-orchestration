@@ -207,7 +207,7 @@ def _local(args: argparse.Namespace) -> dict[str, Any]:
         "task_id": contract.tasks[0].task_id,
         "trial_id": contract.tasks[0].trial_ids[0],
         "build_commit": manifest["commit"],
-        "provider_config_sha256": "0" * 64,
+        "provider_config_sha256": hashlib.sha256(b"{}").hexdigest(),
         "expected_terminal": contract.tasks[0].expected_terminal,
         "observed_terminal": "observed",
         "comparable": True,
