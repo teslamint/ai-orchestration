@@ -11,6 +11,7 @@ import os
 import re
 import statistics
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -314,23 +315,35 @@ def validate_call_events(
             if credential and len(credential) >= 8 and credential in encoded:
                 raise ContractError(f"call event contains credential value from {name}")
         events.append(event)
-    observed = {
+    observed = Counter(
         (event["task_id"], event["stage"], event["provider_id"], event["attempt"])
         for event in events
-    }
-    missing = [
-        expected
-        for expected in expected_attempts
-        if (
+    )
+    expected = Counter(
+        (
             expected.task_id,
             expected.stage,
             expected.provider_id,
             expected.attempt,
         )
-        not in observed
-    ]
-    if missing:
-        raise ContractError(f"missing expected call events: {len(missing)}")
+        for expected in expected_attempts
+    )
+    mismatched = {
+        identity: (expected_count, observed[identity])
+        for identity, expected_count in expected.items()
+        if observed[identity] != expected_count
+    }
+    if mismatched:
+        missing = sum(
+            expected_count - observed_count
+            for expected_count, observed_count in mismatched.values()
+            if observed_count < expected_count
+        )
+        if missing:
+            raise ContractError(f"missing expected call events: {missing}")
+        raise ContractError(
+            f"call event counts do not match expected attempts: {len(mismatched)}"
+        )
     return EventValidation(True, len(events))
 
 

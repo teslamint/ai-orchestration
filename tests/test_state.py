@@ -8,6 +8,7 @@ and "run init" transitions.
 import errno
 import json
 import os
+import uuid
 
 import pytest
 
@@ -29,9 +30,10 @@ def _make_state(**overrides) -> RunState:
     return RunState(**defaults)
 
 
-def test_run_state_schema_version_defaults_to_one():
+def test_run_state_schema_version_defaults_to_two_with_uuid():
     state = _make_state()
-    assert state.schema_version == 1
+    assert state.schema_version == 2
+    assert str(uuid.UUID(state.run_id)) == state.run_id
 
 
 def test_save_and_load_round_trips_all_fields(tmp_path):
@@ -187,6 +189,28 @@ def test_load_state_rejects_boolean_schema_version(tmp_path):
         load_state(path)
 
 
+def test_load_state_rejects_unsupported_schema_and_malformed_v2_uuid(tmp_path):
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "schema_version": 3,
+        "run_id": str(uuid.uuid4()),
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError, match="unsupported schema"):
+        load_state(path)
+
+    payload["schema_version"] = 2
+    payload["run_id"] = "not-a-uuid"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError, match="run_id"):
+        load_state(path)
+
+
 def test_load_state_rejects_non_object_root(tmp_path):
     from ai_orchestration.errors import StateError
 
@@ -275,6 +299,77 @@ def test_resolve_run_start_resume_with_no_saved_state_starts_fresh(tmp_path):
     assert start.current_stage is None
 
 
+def test_v1_resume_migrates_atomically_and_reuses_one_run_id(tmp_path):
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "completed_stages": ["brainstormer"],
+        "current_stage": "reviewer",
+        "outputs": {},
+        "logs": [],
+        "pause_reason": None,
+        "schema_version": 1,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    from ai_orchestration.engine.state import resolve_run_start
+
+    first = resolve_run_start(path, resume=True)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    second = resolve_run_start(path, resume=True)
+
+    assert first.schema_version == 2
+    assert persisted["schema_version"] == 2
+    assert persisted["run_id"] == first.run_id == second.run_id
+
+
+def test_v1_state_rejects_injected_run_id_before_migration(tmp_path):
+    from ai_orchestration.engine.state import resolve_run_start
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "schema_version": 1,
+        "run_id": "attacker-controlled",
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(StateError, match="v1.*run_id"):
+        resolve_run_start(path, resume=True)
+    assert json.loads(path.read_text(encoding="utf-8")) == payload
+
+
+def test_v1_migration_replace_failure_preserves_v1(tmp_path, monkeypatch):
+    from ai_orchestration.engine.state import resolve_run_start
+
+    path = tmp_path / "state.json"
+    original = json.dumps(
+        {
+            "goal": "g",
+            "project_name": "p",
+            "config_snapshot": {},
+            "schema_version": 1,
+        },
+        sort_keys=True,
+    )
+    path.write_text(original, encoding="utf-8")
+
+    def fail_replace(_source, _destination):
+        raise OSError("replace denied")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace denied"):
+        resolve_run_start(path, resume=True)
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 # --- Two-process resume fixture (integration) -------------------------------
 
 
@@ -309,7 +404,8 @@ def test_state_file_json_is_stable_and_readable(tmp_path):
     save_state(_make_state(current_stage="executor"), path)
     raw = json.loads(path.read_text())
     assert raw["current_stage"] == "executor"
-    assert raw["schema_version"] == 1
+    assert raw["schema_version"] == 2
+    assert str(uuid.UUID(raw["run_id"])) == raw["run_id"]
 
 
 # --- Concurrent-run lock (finding #5) ---------------------------------------

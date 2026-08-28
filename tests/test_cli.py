@@ -144,6 +144,58 @@ def _install_fakes(monkeypatch):
     monkeypatch.setattr(cli_module, "_cli_provider_factory", _fake_cli_factory)
 
 
+def test_fresh_v2_state_is_persisted_before_first_provider_call(tmp_path, monkeypatch):
+    state_path = tmp_path / "persist_first" / ".ai_orchestration" / "run_state.json"
+    observed_run_ids = []
+
+    class StateObservingProvider(_FakeProvider):
+        def complete(self, prompt: str, *, system=None, **kwargs) -> str:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            assert payload["schema_version"] == 2
+            observed_run_ids.append(payload["run_id"])
+            return super().complete(prompt, system=system, **kwargs)
+
+    monkeypatch.setattr(
+        cli_module,
+        "_http_provider_factory",
+        lambda model: StateObservingProvider(model),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_cli_provider_factory",
+        lambda binary: StateObservingProvider(binary),
+    )
+    _install_reachable_catalog(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "persist before provider",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "persist_first",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--skip-review",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    final = json.loads(state_path.read_text(encoding="utf-8"))
+    assert observed_run_ids
+    assert set(observed_run_ids) == {final["run_id"]}
+    from ai_orchestration.providers.call_events import read_call_events
+
+    events = read_call_events(state_path.with_name("call_events.jsonl"))
+    assert events
+    assert {event.run_id for event in events} == {final["run_id"]}
+    assert {event.stage for event in events}.issuperset(
+        {"brainstormer", "reviewer", "planner", "executor"}
+    )
+
+
 # --- happy: --help lists every preserved option -----------------------------
 
 
@@ -568,9 +620,10 @@ def test_custom_provider_endpoint_reaches_real_http_provider_factory(monkeypatch
     captured = {}
 
     class _SpyHttpProvider:
-        def __init__(self, *, model, base_url, api_key):
+        def __init__(self, *, model, base_url, api_key, authorization_gate):
             captured["base_url"] = base_url
             captured["api_key"] = api_key
+            captured["authorization_gate"] = authorization_gate
             self.model = model
 
         def complete(self, prompt, **kwargs):
@@ -593,6 +646,7 @@ def test_custom_provider_endpoint_reaches_real_http_provider_factory(monkeypatch
     provider = cli_module._http_provider_factory("gpt-5.5")
     assert captured["base_url"] == "http://custom-endpoint:1234/v1"
     assert captured["api_key"] == "custom-key"
+    assert captured["authorization_gate"] is cli_module._active_authorization_gate
     assert isinstance(provider, _SpyHttpProvider)
 
 

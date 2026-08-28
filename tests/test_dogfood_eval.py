@@ -153,6 +153,33 @@ def test_call_event_validation_rejects_current_credential_value(tmp_path, monkey
         validate_call_events(path, [])
 
 
+def test_call_event_validation_rejects_duplicate_attempt_identity(tmp_path):
+    path = tmp_path / "events.jsonl"
+    event = {
+        "version": "call-event/v1",
+        "run_id": "99756532-a866-4e91-8480-47adac64778e",
+        "task_id": "C1-R",
+        "executor_step_id": None,
+        "stage": "planner",
+        "provider_kind": "proxy_model",
+        "provider_id": "gpt-test",
+        "attempt": 1,
+        "prompt_bytes": 1,
+        "estimated_input_tokens": 1,
+        "reported_input_tokens": None,
+        "reported_output_tokens": None,
+        "transport_retry_count": None,
+        "latency_ms": 1,
+        "outcome": "success",
+        "error_kind": None,
+    }
+    path.write_text((json.dumps(event) + "\n") * 2, encoding="utf-8")
+    expected = [ExpectedAttempt("C1-R", "planner", "gpt-test", 1)]
+
+    with pytest.raises(ContractError, match="counts"):
+        validate_call_events(path, expected)
+
+
 def test_compare_builds_pairs_terminal_latency_and_reports_unmeasured_cost():
     baseline = [
         TrialResult("C1-E", "01", "success", 100, 8, True, None),
@@ -291,6 +318,7 @@ def test_cli_preflight_is_offline_and_live_commands_fail_closed(tmp_path):
     result = subprocess.run(command, text=True, capture_output=True, env=env)
     assert result.returncode == 0
     assert json.loads(result.stdout)["adapter_eligibility"] == "open"
+    assert json.loads(result.stdout)["authorization_gate"] == "ready"
 
     result = subprocess.run(
         [sys.executable, "scripts/run_dogfood_eval.py", "pilot"],

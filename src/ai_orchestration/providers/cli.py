@@ -32,6 +32,11 @@ from ai_orchestration.providers.base import (
     ToolType,
     flatten_json_schema,
 )
+from ai_orchestration.providers.call_control import (
+    AuthorizationGate,
+    NoOpAuthorizationGate,
+    OutboundPayload,
+)
 from ai_orchestration.utils.extract import extract_code_content, extract_json_object
 from ai_orchestration.utils.subprocess_diag import truncate_stderr as _truncate_stderr
 
@@ -238,6 +243,9 @@ class BaseCLIProvider:
     # extractor on their output would silently drop every non-JSON line.
     _debug_uses_stream_json: bool = False
 
+    def __init__(self, *, authorization_gate: AuthorizationGate | None = None) -> None:
+        self.authorization_gate = authorization_gate or NoOpAuthorizationGate()
+
     def get_binary_path(self) -> str:
         return shutil.which(self._binary_name) or self._binary_name
 
@@ -272,6 +280,7 @@ class BaseCLIProvider:
         if system:
             prompt = f"{system}\n\n{prompt}"
         cmd = self.build_command(prompt, debug=debug)
+        self.authorization_gate.authorize(OutboundPayload.for_cli_argv(cmd))
         return _run_cli_subprocess(
             cmd,
             binary_name=self._binary_name,
@@ -353,6 +362,7 @@ class AgyProvider(BaseCLIProvider):
             schema_path = handle.name
         try:
             cmd = self.build_structured_command(prompt, schema_path)
+            self.authorization_gate.authorize(OutboundPayload.for_cli_argv(cmd))
             text = _run_cli_subprocess(
                 cmd, binary_name=self._binary_name, timeout=timeout
             )

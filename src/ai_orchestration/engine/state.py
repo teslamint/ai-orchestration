@@ -28,13 +28,14 @@ import fcntl
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, field
+import uuid
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from ai_orchestration.errors import StateError
 
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -54,6 +55,7 @@ class RunState:
     outputs: dict[str, Any] = field(default_factory=dict)
     logs: list[dict[str, Any]] = field(default_factory=list)
     pause_reason: Optional[str] = None
+    run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     schema_version: int = STATE_SCHEMA_VERSION
 
 
@@ -141,6 +143,28 @@ def _validate_run_state_payload(payload: Any, path: Path) -> None:
                 f"run state at {path} field 'schema_version' must be an "
                 f"integer, got {type(version).__name__}"
             )
+    else:
+        version = 1
+    if version not in (1, STATE_SCHEMA_VERSION):
+        raise StateError(
+            f"run state at {path} has unsupported schema version {version}"
+        )
+    if version == 1 and "run_id" in payload:
+        raise StateError(f"run state at {path} schema v1 must not contain 'run_id'")
+    if version == STATE_SCHEMA_VERSION:
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str):
+            raise StateError(
+                f"run state at {path} field 'run_id' must be a UUID string"
+            )
+        try:
+            parsed_run_id = uuid.UUID(run_id)
+        except ValueError as exc:
+            raise StateError(
+                f"run state at {path} field 'run_id' must be a UUID"
+            ) from exc
+        if str(parsed_run_id) != run_id:
+            raise StateError(f"run state at {path} field 'run_id' must be canonical")
 
 
 def load_state(path: Path) -> Optional[RunState]:
@@ -191,7 +215,22 @@ def resolve_run_start(path: Path, *, resume: bool) -> RunState:
     saved = load_state(path)
     if saved is None:
         return fresh
+    if saved.schema_version == 1:
+        return migrate_and_persist_state(path, saved)
     return saved
+
+
+def migrate_and_persist_state(path: Path, state: RunState) -> RunState:
+    """Persist a v1 state as v2 before any resumed provider invocation."""
+    if state.schema_version == STATE_SCHEMA_VERSION:
+        return state
+    if state.schema_version != 1:
+        raise StateError(
+            f"run state at {path} has unsupported schema version {state.schema_version}"
+        )
+    migrated = replace(state, schema_version=STATE_SCHEMA_VERSION)
+    save_state(migrated, path)
+    return migrated
 
 
 class RunLockedError(StateError):

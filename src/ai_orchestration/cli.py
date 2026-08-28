@@ -60,6 +60,12 @@ from ai_orchestration.models.context import (
     Task,
 )
 from ai_orchestration.prompts.stages import AGENT_PROMPTS
+from ai_orchestration.providers.call_control import (
+    AuthorizationGate,
+    NoOpAuthorizationGate,
+    SocketAuthorizationGate,
+)
+from ai_orchestration.providers.call_events import CallRecorder
 from ai_orchestration.providers.cli import AgyProvider, ClaudeProvider, CodexProvider
 from ai_orchestration.providers.http import HttpProvider, probe_catalog
 from ai_orchestration.providers.routing import (
@@ -133,6 +139,27 @@ class _OfflineSmokeProvider:
 # `--tool-config` `"provider"` block reaches every real completion call,
 # not just startup catalog validation (finding #3).
 _active_provider_config = ProviderConfig()
+_active_authorization_gate: AuthorizationGate = NoOpAuthorizationGate()
+
+
+def _authorization_gate_from_environment(environ: dict[str, str]) -> AuthorizationGate:
+    socket_path = environ.get("AI_ORCHESTRATION_AUTH_SOCKET")
+    payload_path = environ.get("AI_ORCHESTRATION_AUTH_PAYLOAD")
+    if not socket_path and not payload_path:
+        return NoOpAuthorizationGate()
+    if not socket_path or not payload_path:
+        raise ConfigError(
+            "AI_ORCHESTRATION_AUTH_SOCKET and AI_ORCHESTRATION_AUTH_PAYLOAD "
+            "must be set together"
+        )
+    try:
+        timeout = float(environ.get("AI_ORCHESTRATION_AUTH_TIMEOUT", "300"))
+    except ValueError as exc:
+        raise ConfigError("AI_ORCHESTRATION_AUTH_TIMEOUT must be numeric") from exc
+    try:
+        return SocketAuthorizationGate(Path(socket_path), Path(payload_path), timeout)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _http_provider_factory(model: str):
@@ -143,6 +170,7 @@ def _http_provider_factory(model: str):
         model=model,
         base_url=_active_provider_config.base_url,
         api_key=_active_provider_config.api_key,
+        authorization_gate=_active_authorization_gate,
     )
 
 
@@ -151,7 +179,7 @@ def _cli_provider_factory(binary: str):
     if os.environ.get(_FAKE_PROVIDERS_ENV_VAR):
         return _OfflineSmokeProvider()
     provider_class = _CLI_PROVIDER_CLASSES[binary]
-    return provider_class()
+    return provider_class(authorization_gate=_active_authorization_gate)
 
 
 def _probe_catalog_for_startup(base_url: str, api_key: Optional[str]) -> CatalogStatus:
@@ -213,12 +241,22 @@ def _complete_stage_text(
     *,
     debug: bool,
     debug_log_path: Optional[Path],
+    recorder: CallRecorder | None = None,
+    executor_step_id: int | None = None,
 ) -> str:
+    event_stage = (
+        "reviewer"
+        if "reviewer" in stage_name and stage_name != "code_reviewer"
+        else stage_name
+    )
     text, _provider_used = complete_with_fallback(
         stage,
         prompt,
         http_provider_factory=_http_provider_factory,
         cli_provider_factory=_cli_provider_factory,
+        recorder=recorder,
+        stage_name=event_stage,
+        executor_step_id=executor_step_id,
         system=AGENT_PROMPTS[stage_name].get("system", ""),
     )
     _write_debug_log(debug, debug_log_path, f"{stage_name} raw output", text)
@@ -233,13 +271,23 @@ def _complete_stage_structured(
     debug: bool,
     debug_log_path: Optional[Path],
     stage_name: str,
+    recorder: CallRecorder | None = None,
+    executor_step_id: int | None = None,
 ):
+    event_stage = (
+        "reviewer"
+        if "reviewer" in stage_name and stage_name != "code_reviewer"
+        else stage_name
+    )
     result, _provider_used = complete_structured_with_fallback(
         stage,
         prompt,
         schema=schema,
         http_provider_factory=_http_provider_factory,
         cli_provider_factory=_cli_provider_factory,
+        recorder=recorder,
+        stage_name=event_stage,
+        executor_step_id=executor_step_id,
         system=AGENT_PROMPTS[stage_name].get("system", ""),
     )
     _write_debug_log(
@@ -391,7 +439,9 @@ def _run_executor(
                 instruction=prompt,
                 existing_code=_existing,
             )
-            return _complete_stage_text("executor", stage, full_prompt, **d)
+            return _complete_stage_text(
+                "executor", stage, full_prompt, executor_step_id=_task.step_id, **d
+            )
 
         result = run_executor_self_healing(context, task, complete=_complete)
         if not result.success:
@@ -659,8 +709,15 @@ def main(
 
     state_path = project_workspace / ".ai_orchestration" / "run_state.json"
 
-    global _active_provider_config
+    global _active_authorization_gate, _active_provider_config
     _active_provider_config = provider_config
+    try:
+        _active_authorization_gate = _authorization_gate_from_environment(
+            dict(os.environ)
+        )
+    except ConfigError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     try:
         with acquire_run_lock(state_path):
@@ -711,13 +768,23 @@ def _run(
         ),
     )
 
+    resuming_existing = resume and state_path.exists()
     try:
         run_state = resolve_run_start(state_path, resume=resume)
     except StateError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    if run_state.completed_stages:
+    if not resuming_existing:
+        run_state.goal = request
+        run_state.project_name = project_name
+        run_state.config_snapshot = {
+            "stages": {key: value.model for key, value in config.stages.items()}
+        }
+        run_state.outputs = {"context": context.model_dump(mode="json")}
+        save_state(run_state, state_path)
+
+    if resuming_existing:
         if "context" not in run_state.outputs:
             raise StateError(
                 f"run state at {state_path} is missing required 'outputs.context'"
@@ -772,7 +839,14 @@ def _run(
         log_directory=config.workspace_path / "execution_logs",
     )
     command_gate = ApprovalGate(is_tty=_is_tty(), ask=_confirm_interactively)
-    stage_kwargs = dict(debug=config.debug, debug_log_path=config.debug_log_path)
+    recorder = CallRecorder(
+        state_path.with_name("call_events.jsonl"), run_id=run_state.run_id
+    )
+    stage_kwargs = dict(
+        debug=config.debug,
+        debug_log_path=config.debug_log_path,
+        recorder=recorder,
+    )
 
     def _state_snapshot(
         *, current_stage: Optional[str], pause_reason: Optional[str]
@@ -785,6 +859,7 @@ def _run(
             current_stage=current_stage,
             outputs={"context": context.model_dump(mode="json")},
             pause_reason=pause_reason,
+            run_id=run_state.run_id,
         )
 
     def _pause(stage_name: str, exc: PausedRun) -> None:

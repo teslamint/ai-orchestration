@@ -143,6 +143,7 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "version": "dogfood-preflight/v1",
         "adapter_eligibility": "open",
+        "authorization_gate": "ready",
         "contract": contract.version,
         "baseline_commit": baseline["commit"],
         "candidate_commit": candidate["commit"],
@@ -167,6 +168,7 @@ def _approval_packet(args: argparse.Namespace) -> dict[str, Any]:
         "baseline_commit": baseline["commit"],
         "candidate_commit": candidate["commit"],
         "adapter_eligibility": "open",
+        "authorization_gate": "ready",
     }
     _private_write(output, packet)
     return packet

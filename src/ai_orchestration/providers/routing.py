@@ -24,11 +24,65 @@ from pydantic import BaseModel
 
 from ai_orchestration.config import CatalogStatus, SlotKind, StageConfig, classify_slot
 from ai_orchestration.errors import ProviderError
-from ai_orchestration.providers.base import AuthenticationError, TransportError
+from ai_orchestration.providers.base import (
+    AuthenticationError,
+    CLIProviderError,
+    ModelFaultError,
+    TransportError,
+)
+from ai_orchestration.providers.call_events import CallRecorder
 from ai_orchestration.providers.http import HttpProvider
 
 HttpProviderFactory = Callable[[str], object]
 CliProviderFactory = Callable[[str], object]
+
+
+def _error_kind(exc: BaseException) -> str:
+    if isinstance(exc, AuthenticationError):
+        return "authentication"
+    if isinstance(exc, TransportError):
+        return "transport"
+    if isinstance(exc, ModelFaultError):
+        return "model"
+    if isinstance(exc, CLIProviderError):
+        return "cli"
+    return "provider"
+
+
+def _invoke_recorded(
+    provider,
+    method_name: str,
+    prompt: str,
+    *,
+    recorder: CallRecorder | None,
+    stage_name: str | None,
+    provider_kind: str,
+    provider_id: str,
+    attempt_number: int,
+    call_kwargs: dict,
+    executor_step_id: str | int | None = None,
+):
+    if recorder is None:
+        return getattr(provider, method_name)(prompt, **call_kwargs)
+    if stage_name is None:
+        raise ValueError("stage_name is required when recording provider calls")
+    attempt = recorder.start_attempt(
+        stage=stage_name,
+        provider_kind=provider_kind,
+        provider_id=provider_id,
+        attempt=attempt_number,
+        prompt=prompt,
+        executor_step_id=executor_step_id,
+    )
+    if hasattr(provider, "usage_sink"):
+        provider.usage_sink = attempt.attach_usage
+    try:
+        result = getattr(provider, method_name)(prompt, **call_kwargs)
+    except BaseException as exc:
+        attempt.finish(outcome="error", error_kind=_error_kind(exc))
+        raise
+    attempt.finish(outcome="success")
+    return result
 
 
 def resolve_provider_chain(
@@ -53,6 +107,9 @@ def complete_with_fallback(
     *,
     http_provider_factory: HttpProviderFactory,
     cli_provider_factory: CliProviderFactory,
+    recorder: CallRecorder | None = None,
+    stage_name: str | None = None,
+    executor_step_id: str | int | None = None,
     **complete_kwargs,
 ) -> tuple[str, str]:
     """Complete a prompt for `stage`, applying fault-class-aware fallback.
@@ -62,11 +119,39 @@ def complete_with_fallback(
     """
     if classify_slot(stage.model) is SlotKind.BINARY:
         provider = cli_provider_factory(stage.model)
-        return provider.complete(prompt, **complete_kwargs), stage.model
+        return (
+            _invoke_recorded(
+                provider,
+                "complete",
+                prompt,
+                recorder=recorder,
+                stage_name=stage_name,
+                provider_kind="cli_binary",
+                provider_id=stage.model,
+                attempt_number=1,
+                call_kwargs=complete_kwargs,
+                executor_step_id=executor_step_id,
+            ),
+            stage.model,
+        )
 
     primary = http_provider_factory(stage.model)
     try:
-        return primary.complete(prompt, **complete_kwargs), stage.model
+        return (
+            _invoke_recorded(
+                primary,
+                "complete",
+                prompt,
+                recorder=recorder,
+                stage_name=stage_name,
+                provider_kind="proxy_model",
+                provider_id=stage.model,
+                attempt_number=1,
+                call_kwargs=complete_kwargs,
+                executor_step_id=executor_step_id,
+            ),
+            stage.model,
+        )
     except TransportError as primary_exc:
         # S5: endpoint-level fault. fallback_model shares the dead
         # transport, so skip straight to fallback_binary.
@@ -74,7 +159,21 @@ def complete_with_fallback(
             raise
         cli = cli_provider_factory(stage.fallback_binary)
         try:
-            return cli.complete(prompt, **complete_kwargs), stage.fallback_binary
+            return (
+                _invoke_recorded(
+                    cli,
+                    "complete",
+                    prompt,
+                    recorder=recorder,
+                    stage_name=stage_name,
+                    provider_kind="cli_binary",
+                    provider_id=stage.fallback_binary,
+                    attempt_number=2,
+                    call_kwargs=complete_kwargs,
+                    executor_step_id=executor_step_id,
+                ),
+                stage.fallback_binary,
+            )
         except Exception as fallback_exc:
             raise ProviderError(
                 f"{stage.model}: {primary_exc}; fallback_binary "
@@ -90,7 +189,21 @@ def complete_with_fallback(
             raise
         fallback = http_provider_factory(stage.fallback_model)
         try:
-            return fallback.complete(prompt, **complete_kwargs), stage.fallback_model
+            return (
+                _invoke_recorded(
+                    fallback,
+                    "complete",
+                    prompt,
+                    recorder=recorder,
+                    stage_name=stage_name,
+                    provider_kind="proxy_model",
+                    provider_id=stage.fallback_model,
+                    attempt_number=2,
+                    call_kwargs=complete_kwargs,
+                    executor_step_id=executor_step_id,
+                ),
+                stage.fallback_model,
+            )
         except Exception as fallback_exc:
             raise ProviderError(
                 f"{stage.model}: {primary_exc}; fallback_model "
@@ -105,20 +218,45 @@ def complete_structured_with_fallback(
     schema: type[BaseModel],
     http_provider_factory: HttpProviderFactory,
     cli_provider_factory: CliProviderFactory,
+    recorder: CallRecorder | None = None,
+    stage_name: str | None = None,
+    executor_step_id: str | int | None = None,
     **complete_kwargs,
 ) -> tuple[BaseModel, str]:
     """Structured-output counterpart of `complete_with_fallback`."""
     if classify_slot(stage.model) is SlotKind.BINARY:
         provider = cli_provider_factory(stage.model)
         return (
-            provider.complete_structured(prompt, schema=schema, **complete_kwargs),
+            _invoke_recorded(
+                provider,
+                "complete_structured",
+                prompt,
+                recorder=recorder,
+                stage_name=stage_name,
+                provider_kind="cli_binary",
+                provider_id=stage.model,
+                attempt_number=1,
+                call_kwargs={"schema": schema, **complete_kwargs},
+                executor_step_id=executor_step_id,
+            ),
             stage.model,
         )
 
     primary = http_provider_factory(stage.model)
     try:
         return (
-            primary.complete_structured(prompt, schema=schema, **complete_kwargs),
+            _invoke_recorded(
+                primary,
+                "complete_structured",
+                prompt,
+                recorder=recorder,
+                stage_name=stage_name,
+                provider_kind="proxy_model",
+                provider_id=stage.model,
+                attempt_number=1,
+                call_kwargs={"schema": schema, **complete_kwargs},
+                executor_step_id=executor_step_id,
+            ),
             stage.model,
         )
     except TransportError as primary_exc:
@@ -127,7 +265,18 @@ def complete_structured_with_fallback(
         cli = cli_provider_factory(stage.fallback_binary)
         try:
             return (
-                cli.complete_structured(prompt, schema=schema, **complete_kwargs),
+                _invoke_recorded(
+                    cli,
+                    "complete_structured",
+                    prompt,
+                    recorder=recorder,
+                    stage_name=stage_name,
+                    provider_kind="cli_binary",
+                    provider_id=stage.fallback_binary,
+                    attempt_number=2,
+                    call_kwargs={"schema": schema, **complete_kwargs},
+                    executor_step_id=executor_step_id,
+                ),
                 stage.fallback_binary,
             )
         except Exception as fallback_exc:
@@ -143,7 +292,18 @@ def complete_structured_with_fallback(
         fallback = http_provider_factory(stage.fallback_model)
         try:
             return (
-                fallback.complete_structured(prompt, schema=schema, **complete_kwargs),
+                _invoke_recorded(
+                    fallback,
+                    "complete_structured",
+                    prompt,
+                    recorder=recorder,
+                    stage_name=stage_name,
+                    provider_kind="proxy_model",
+                    provider_id=stage.fallback_model,
+                    attempt_number=2,
+                    call_kwargs={"schema": schema, **complete_kwargs},
+                    executor_step_id=executor_step_id,
+                ),
                 stage.fallback_model,
             )
         except Exception as fallback_exc:

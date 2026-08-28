@@ -23,6 +23,12 @@ from ai_orchestration.providers.base import (
     TransportError,
     flatten_json_schema,
 )
+from ai_orchestration.providers.call_control import (
+    AuthorizationGate,
+    NoOpAuthorizationGate,
+    OutboundPayload,
+)
+from ai_orchestration.providers.call_events import UsageSink
 from ai_orchestration.utils.extract import extract_json_object
 
 # Default per-call wall-clock limit: a hung proxy call must not stall the
@@ -76,10 +82,14 @@ class HttpProvider:
         transport: Optional[httpx.BaseTransport] = None,
         max_retries: int = 2,
         timeout: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+        usage_sink: UsageSink | None = None,
+        authorization_gate: AuthorizationGate | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url
         self.timeout = timeout
+        self.usage_sink = usage_sink
+        self.authorization_gate = authorization_gate or NoOpAuthorizationGate()
         http_client = (
             httpx.Client(transport=transport) if transport is not None else None
         )
@@ -99,10 +109,10 @@ class HttpProvider:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+        request = {"model": self.model, "messages": messages}
+        self.authorization_gate.authorize(OutboundPayload.for_http_json(request))
         try:
-            response = self._client.chat.completions.create(
-                model=self.model, messages=messages
-            )
+            response = self._client.chat.completions.create(**request)
         except (APIConnectionError, httpx.ConnectError, httpx.TimeoutException) as exc:
             raise TransportError(f"{self.model}: endpoint unreachable ({exc})") from exc
         except APIStatusError as exc:
@@ -116,6 +126,7 @@ class HttpProvider:
             ) from exc
         if not response.choices:
             raise ModelFaultError(f"{self.model}: response contained empty choices")
+        self._attach_usage(response)
         return response.choices[0].message.content or ""
 
     def complete_structured(
@@ -128,19 +139,21 @@ class HttpProvider:
         messages.append({"role": "user", "content": prompt})
         flat_schema = flatten_json_schema(schema.model_json_schema())
 
-        try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": schema.__name__,
-                        "schema": flat_schema,
-                        "strict": True,
-                    },
+        request = {
+            "model": self.model,
+            "messages": messages,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema.__name__,
+                    "schema": flat_schema,
+                    "strict": True,
                 },
-            )
+            },
+        }
+        self.authorization_gate.authorize(OutboundPayload.for_http_json(request))
+        try:
+            response = self._client.chat.completions.create(**request)
         except (APIConnectionError, httpx.ConnectError, httpx.TimeoutException) as exc:
             raise TransportError(f"{self.model}: endpoint unreachable ({exc})") from exc
         except APIStatusError as exc:
@@ -149,10 +162,11 @@ class HttpProvider:
             try:
                 # Some OpenAI-compatible proxies reject structured-output
                 # requests while accepting the same prompt as plain text.
-                response = self._client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
+                fallback_request = {"model": self.model, "messages": messages}
+                self.authorization_gate.authorize(
+                    OutboundPayload.for_http_json(fallback_request)
                 )
+                response = self._client.chat.completions.create(**fallback_request)
             except (
                 APIConnectionError,
                 httpx.ConnectError,
@@ -174,6 +188,7 @@ class HttpProvider:
 
         if not response.choices:
             raise ModelFaultError(f"{self.model}: response contained empty choices")
+        self._attach_usage(response)
         text = response.choices[0].message.content or ""
         payload = extract_json_object(text)
         if payload is not None:
@@ -196,6 +211,22 @@ class HttpProvider:
             raise ModelFaultError(
                 f"{self.model}: extracted JSON failed schema validation ({exc})"
             ) from exc
+
+    def _attach_usage(self, response) -> None:
+        if self.usage_sink is None:
+            return
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            self.usage_sink(None)
+            return
+        normalized = {}
+        input_tokens = getattr(usage, "prompt_tokens", None)
+        output_tokens = getattr(usage, "completion_tokens", None)
+        if input_tokens is not None:
+            normalized["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            normalized["output_tokens"] = output_tokens
+        self.usage_sink(normalized or None)
 
     @staticmethod
     def _response_format_unsupported(exc: APIStatusError) -> bool:
