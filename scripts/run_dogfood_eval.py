@@ -10,17 +10,29 @@ import os
 import secrets
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
+from ai_orchestration.config import SlotKind, classify_slot
 from ai_orchestration.evals.dogfood import (
     ContractError,
+    ExpectedAttempt,
     consume_receipt,
     load_eval_contract,
+    validate_call_events,
     validate_result,
 )
 
 LIVE_COMMANDS = {"pilot", "full", "grading", "authorize-invocation"}
+STAGE_NAMES = {
+    "brainstormer",
+    "reviewer",
+    "planner",
+    "executor",
+    "code_reviewer",
+    "fixer",
+}
 
 
 class EvalArgumentParser(argparse.ArgumentParser):
@@ -36,7 +48,14 @@ def _parser() -> argparse.ArgumentParser:
     _add(preflight, "--contract", "--baseline-manifest", "--candidate-manifest")
 
     local = commands.add_parser("local")
-    _add(local, "--contract", "--build-manifest", "--output")
+    _add(
+        local,
+        "--contract",
+        "--build-manifest",
+        "--call-events",
+        "--expected-attempts",
+        "--output",
+    )
 
     approval = commands.add_parser("approval-packet")
     _add(
@@ -202,27 +221,200 @@ def _local(args: argparse.Namespace) -> dict[str, Any]:
     )
     contract = load_eval_contract(contract_path)
     manifest = _manifest(manifest_path)
+    stability_checks = {"synthetic": True}
+    usage = None
+    artifact_manifest: dict[str, Any] = {}
+    provider_config_sha256 = hashlib.sha256(b"{}").hexdigest()
+    elapsed_ms = 0
+    trial_id = contract.tasks[0].trial_ids[0]
+    candidate_args = (args.call_events, args.expected_attempts)
+    if any(candidate_args):
+        if not all(candidate_args):
+            raise ContractError(
+                "local candidate observation requires --call-events, "
+                "and --expected-attempts"
+            )
+        observation = _candidate_observation(
+            Path(args.call_events), Path(args.expected_attempts)
+        )
+        stability_checks.update(
+            {"call_events_valid": True, "direct_vendor_observed": True}
+        )
+        usage = observation.pop("usage")
+        elapsed_ms = observation.pop("elapsed_ms")
+        trial_id = observation.pop("trial_id")
+        provider_config_sha256 = observation.pop("provider_config_sha256")
+        artifact_manifest = observation
     result = {
         "version": "dogfood-result/v1",
         "task_id": contract.tasks[0].task_id,
-        "trial_id": contract.tasks[0].trial_ids[0],
+        "trial_id": trial_id,
         "build_commit": manifest["commit"],
-        "provider_config_sha256": hashlib.sha256(b"{}").hexdigest(),
+        "provider_config_sha256": provider_config_sha256,
         "expected_terminal": contract.tasks[0].expected_terminal,
         "observed_terminal": "observed",
         "comparable": True,
-        "stability_checks": {"synthetic": True},
+        "stability_checks": stability_checks,
         "test_passed": True,
         "rubric_scores": None,
-        "elapsed_ms": 0,
-        "usage": None,
+        "elapsed_ms": elapsed_ms,
+        "usage": usage,
         "cost_status": "not_measurable",
-        "artifact_manifest": {},
+        "artifact_manifest": artifact_manifest,
         "artifact_checks": {"sanitized": True},
     }
     _private_write(output, result)
     validate_result(output)
     return result
+
+
+def _candidate_observation(path: Path, expected_path: Path) -> dict[str, Any]:
+    event_bytes = _input_snapshot(path, "call-event")
+    try:
+        lines = event_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ContractError("call-event file must contain UTF-8") from exc
+    events: list[dict[str, Any]] = []
+    for ordinal, line in enumerate(lines, 1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ContractError(f"malformed call event at line {ordinal}") from exc
+        if not isinstance(event, dict):
+            raise ContractError(f"call event at line {ordinal} must be an object")
+        events.append(event)
+    expected_bytes = _input_snapshot(expected_path, "expected-attempt")
+    try:
+        expected_manifest = json.loads(expected_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("expected-attempt manifest is invalid JSON") from exc
+    if not isinstance(expected_manifest, dict):
+        raise ContractError("expected-attempt manifest must be an object")
+    if set(expected_manifest) != {
+        "version",
+        "task_id",
+        "trial_id",
+        "run_id",
+        "provider_config",
+        "attempts",
+    }:
+        raise ContractError("expected-attempt manifest has an unexpected shape")
+    if (
+        expected_manifest["version"] != "expected-attempts/v1"
+        or expected_manifest["task_id"] != "C1-R"
+        or expected_manifest["trial_id"] not in {"01", "02", "03"}
+        or not isinstance(expected_manifest["run_id"], str)
+        or not expected_manifest["run_id"]
+        or not isinstance(expected_manifest["provider_config"], dict)
+        or not isinstance(expected_manifest["attempts"], list)
+    ):
+        raise ContractError("expected-attempt manifest is invalid")
+    try:
+        uuid.UUID(expected_manifest["run_id"])
+    except ValueError as exc:
+        raise ContractError("expected-attempt run_id must be a UUID") from exc
+    expected = []
+    for raw in expected_manifest["attempts"]:
+        if not isinstance(raw, dict) or set(raw) != {
+            "task_id",
+            "stage",
+            "provider_id",
+            "attempt",
+        }:
+            raise ContractError("expected attempt has an unexpected shape")
+        if (
+            not isinstance(raw["task_id"], str)
+            or raw["task_id"] != expected_manifest["task_id"]
+        ):
+            raise ContractError("expected attempt task_id is invalid")
+        if not isinstance(raw["stage"], str) or raw["stage"] not in STAGE_NAMES:
+            raise ContractError("expected attempt stage is invalid")
+        if not isinstance(raw["provider_id"], str) or not raw["provider_id"]:
+            raise ContractError("expected attempt provider_id is invalid")
+        if type(raw["attempt"]) is not int or raw["attempt"] < 1:
+            raise ContractError("expected attempt attempt is invalid")
+        expected.append(
+            ExpectedAttempt(
+                raw["task_id"], raw["stage"], raw["provider_id"], raw["attempt"]
+            )
+        )
+    if len(expected) != 4 or len(set(expected)) != 4:
+        raise ContractError("expected-attempt manifest requires four unique calls")
+    with tempfile.TemporaryDirectory(prefix="dogfood-events-") as temporary:
+        snapshot_path = Path(temporary) / "call_events.jsonl"
+        snapshot_path.write_bytes(event_bytes)
+        validation = validate_call_events(snapshot_path, expected)
+    if validation.event_count != 4:
+        raise ContractError("candidate routing matrix must contain exactly four calls")
+    if any(
+        event.get("run_id") != expected_manifest["run_id"]
+        or event.get("task_id") != "C1-R"
+        or event.get("outcome") != "success"
+        for event in events
+    ):
+        raise ContractError("candidate routing matrix must be one successful C1-R run")
+    provider_config = expected_manifest["provider_config"]
+    if set(provider_config) != STAGE_NAMES or not all(
+        isinstance(value, str) and value for value in provider_config.values()
+    ):
+        raise ContractError("expected provider config must name all six stages")
+    if any(
+        provider_config.get(event["stage"]) != event["provider_id"] for event in events
+    ):
+        raise ContractError("call events do not match the expected provider config")
+    direct = [
+        event
+        for event in events
+        if event.get("provider_kind") == "direct_vendor"
+        and event.get("provider_id") in {"gemini_api", "openai_api", "anthropic_api"}
+    ]
+    if {event["provider_id"] for event in direct} != {
+        "gemini_api",
+        "openai_api",
+        "anthropic_api",
+    } or len(direct) != 3:
+        raise ContractError("candidate routing matrix requires all direct vendors")
+    proxy = [event for event in events if event.get("provider_kind") == "proxy_model"]
+    if (
+        len(proxy) != 1
+        or classify_slot(proxy[0]["provider_id"]) is not SlotKind.PROXY_MODEL
+    ):
+        raise ContractError(
+            "candidate routing matrix requires one ordinary proxy observation"
+        )
+    input_tokens = sum(event.get("reported_input_tokens") or 0 for event in direct)
+    output_tokens = sum(event.get("reported_output_tokens") or 0 for event in direct)
+    usage = (
+        {"input_tokens": input_tokens, "output_tokens": output_tokens}
+        if any(
+            event.get("reported_input_tokens") is not None
+            or event.get("reported_output_tokens") is not None
+            for event in direct
+        )
+        else None
+    )
+    return {
+        "call_event_count": validation.event_count,
+        "call_events_sha256": hashlib.sha256(event_bytes).hexdigest(),
+        "expected_attempts_sha256": hashlib.sha256(expected_bytes).hexdigest(),
+        "run_id": expected_manifest["run_id"],
+        "direct_vendor_ids": sorted({event["provider_id"] for event in direct}),
+        "elapsed_ms": sum(event["latency_ms"] for event in events),
+        "trial_id": expected_manifest["trial_id"],
+        "provider_config_sha256": hashlib.sha256(
+            json.dumps(provider_config, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "usage": usage,
+    }
+
+
+def _input_snapshot(path: Path, label: str) -> bytes:
+    if path.is_symlink():
+        raise ContractError(f"symlinked path is not allowed: {path}")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise ContractError(f"{label} file is unreadable: {path}") from exc
 
 
 def main(argv: list[str] | None = None) -> int:

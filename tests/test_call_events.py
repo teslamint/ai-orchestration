@@ -282,6 +282,40 @@ def test_routing_records_primary_and_fallback_attempts_in_order(tmp_path):
     assert "secret prompt" not in recorder.path.read_text(encoding="utf-8")
 
 
+def test_direct_routing_finalizes_one_content_free_usage_event(tmp_path):
+    recorder = CallRecorder(tmp_path / "events.jsonl", run_id=RUN_ID, task_id="C1-R")
+
+    class DirectProvider:
+        usage_sink = None
+
+        def complete(self, _prompt, **_kwargs):
+            self.usage_sink({"prompt_tokens": 13, "completion_tokens": 8})
+            return "ok"
+
+    result, provider_id = complete_with_fallback(
+        StageConfig(model="anthropic_api"),
+        "candidate secret prompt",
+        http_provider_factory=lambda _model: pytest.fail("used proxy factory"),
+        cli_provider_factory=lambda _binary: pytest.fail("used CLI factory"),
+        direct_provider_factory=lambda _tool_type: DirectProvider(),
+        recorder=recorder,
+        stage_name="planner",
+    )
+
+    assert (result, provider_id) == ("ok", "anthropic_api")
+    [event] = recorder.read_events()
+    assert (
+        event.task_id,
+        event.provider_kind,
+        event.provider_id,
+        event.reported_input_tokens,
+        event.reported_output_tokens,
+        event.outcome,
+    ) == ("C1-R", "direct_vendor", "anthropic_api", 13, 8, "success")
+    persisted = recorder.path.read_text(encoding="utf-8")
+    assert "candidate secret prompt" not in persisted
+
+
 def test_http_provider_reports_only_available_sdk_usage():
     observed = []
     provider = HttpProvider(

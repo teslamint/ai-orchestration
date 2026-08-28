@@ -177,8 +177,39 @@ def test_call_event_validation_rejects_duplicate_attempt_identity(tmp_path):
     path.write_text((json.dumps(event) + "\n") * 2, encoding="utf-8")
     expected = [ExpectedAttempt("C1-R", "planner", "gpt-test", 1)]
 
-    with pytest.raises(ContractError, match="counts"):
+    with pytest.raises(ContractError, match="unexpected call events"):
         validate_call_events(path, expected)
+
+
+def test_call_event_validation_rejects_unexpected_extra_identity(tmp_path):
+    path = tmp_path / "events.jsonl"
+    base = {
+        "version": "call-event/v1",
+        "run_id": "99756532-a866-4e91-8480-47adac64778e",
+        "task_id": "C1-R",
+        "executor_step_id": None,
+        "stage": "planner",
+        "provider_kind": "direct_vendor",
+        "provider_id": "openai_api",
+        "attempt": 1,
+        "prompt_bytes": 1,
+        "estimated_input_tokens": 1,
+        "reported_input_tokens": None,
+        "reported_output_tokens": None,
+        "transport_retry_count": None,
+        "latency_ms": 1,
+        "outcome": "success",
+        "error_kind": None,
+    }
+    extra = {**base, "stage": "executor", "provider_id": "gpt-5.5"}
+    path.write_text(
+        json.dumps(base) + "\n" + json.dumps(extra) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ContractError, match="unexpected call events"):
+        validate_call_events(
+            path, [ExpectedAttempt("C1-R", "planner", "openai_api", 1)]
+        )
 
 
 def test_compare_builds_pairs_terminal_latency_and_reports_unmeasured_cost():
@@ -367,6 +398,223 @@ def test_cli_local_writes_private_output_and_rejects_symlinked_root(tmp_path):
     result = subprocess.run(command, text=True, capture_output=True, env=env)
     assert result.returncode == 1
     assert "symlinked output root" in result.stderr
+
+
+def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {"version": "build-manifest/v1", "commit": "c" * 40, "dirty": False}
+        ),
+        encoding="utf-8",
+    )
+    run_id = "99756532-a866-4e91-8480-47adac64778e"
+    routes = [
+        ("brainstormer", "direct_vendor", "gemini_api"),
+        ("reviewer", "direct_vendor", "anthropic_api"),
+        ("planner", "direct_vendor", "openai_api"),
+        ("executor", "proxy_model", "claude-sonnet-5"),
+    ]
+    event_rows = [
+        {
+            "version": "call-event/v1",
+            "run_id": run_id,
+            "task_id": "C1-R",
+            "executor_step_id": None,
+            "stage": stage,
+            "provider_kind": provider_kind,
+            "provider_id": provider_id,
+            "attempt": 1,
+            "prompt_bytes": 20,
+            "estimated_input_tokens": 5,
+            "reported_input_tokens": 11 if provider_kind == "direct_vendor" else None,
+            "reported_output_tokens": 5 if provider_kind == "direct_vendor" else None,
+            "transport_retry_count": None,
+            "latency_ms": 2,
+            "outcome": "success",
+            "error_kind": None,
+        }
+        for stage, provider_kind, provider_id in routes
+    ]
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        "".join(json.dumps(event) + "\n" for event in event_rows), encoding="utf-8"
+    )
+    provider_config = {
+        "brainstormer": "gemini_api",
+        "reviewer": "anthropic_api",
+        "planner": "openai_api",
+        "executor": "claude-sonnet-5",
+        "code_reviewer": "gpt-5.5",
+        "fixer": "claude-sonnet-5",
+    }
+    expected = tmp_path / "expected.json"
+    expected.write_text(
+        json.dumps(
+            {
+                "version": "expected-attempts/v1",
+                "task_id": "C1-R",
+                "trial_id": "01",
+                "run_id": run_id,
+                "provider_config": provider_config,
+                "attempts": [
+                    {
+                        "task_id": "C1-R",
+                        "stage": stage,
+                        "provider_id": provider_id,
+                        "attempt": 1,
+                    }
+                    for stage, _provider_kind, provider_id in routes
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "candidate-fragment.json"
+    command = [
+        sys.executable,
+        "scripts/run_dogfood_eval.py",
+        "local",
+        "--contract",
+        str(CONTRACT),
+        "--build-manifest",
+        str(manifest),
+        "--call-events",
+        str(events),
+        "--expected-attempts",
+        str(expected),
+        "--output",
+        str(output),
+    ]
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": "src"}
+
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+
+    assert result.returncode == 0, result.stderr
+    fragment = validate_result(output)
+    assert fragment["stability_checks"] == {
+        "call_events_valid": True,
+        "direct_vendor_observed": True,
+        "synthetic": True,
+    }
+    assert fragment["artifact_manifest"] == {
+        "call_event_count": 4,
+        "call_events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
+        "direct_vendor_ids": ["anthropic_api", "gemini_api", "openai_api"],
+        "expected_attempts_sha256": hashlib.sha256(expected.read_bytes()).hexdigest(),
+        "run_id": run_id,
+    }
+    assert (
+        fragment["provider_config_sha256"]
+        == hashlib.sha256(
+            json.dumps(provider_config, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    assert fragment["elapsed_ms"] == 8
+    assert fragment["usage"] == {"input_tokens": 33, "output_tokens": 15}
+    assert fragment["artifact_checks"]["sanitized"] is True
+
+    expected_payload = json.loads(expected.read_text(encoding="utf-8"))
+    for field, invalid_value in (
+        ("task_id", 7),
+        ("stage", []),
+        ("provider_id", []),
+        ("attempt", True),
+        ("attempt", []),
+    ):
+        invalid_payload = json.loads(json.dumps(expected_payload))
+        invalid_payload["attempts"][0][field] = invalid_value
+        expected.write_text(json.dumps(invalid_payload), encoding="utf-8")
+        command[-1] = str(tmp_path / f"invalid-{field}.json")
+        result = subprocess.run(command, text=True, capture_output=True, env=env)
+        assert result.returncode == 1
+        assert f"expected attempt {field} is invalid" in result.stderr
+
+    expected.write_text(json.dumps(expected_payload), encoding="utf-8")
+    reserved_proxy_rows = [dict(event) for event in event_rows]
+    reserved_proxy_rows[-1]["provider_id"] = "openai_api"
+    events.write_text(
+        "".join(json.dumps(event) + "\n" for event in reserved_proxy_rows),
+        encoding="utf-8",
+    )
+    expected_payload["attempts"][-1]["provider_id"] = "openai_api"
+    expected_payload["provider_config"]["executor"] = "openai_api"
+    expected.write_text(json.dumps(expected_payload), encoding="utf-8")
+    command[-1] = str(tmp_path / "reserved-proxy.json")
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 1
+    assert "ordinary proxy observation" in result.stderr
+
+    expected_payload["run_id"] = "not-a-uuid"
+    expected.write_text(json.dumps(expected_payload), encoding="utf-8")
+    command[-1] = str(tmp_path / "invalid-run.json")
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 1
+    assert "run_id must be a UUID" in result.stderr
+
+
+def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {"version": "build-manifest/v1", "commit": "d" * 40, "dirty": False}
+        ),
+        encoding="utf-8",
+    )
+    events = tmp_path / "events.jsonl"
+    events.write_text("", encoding="utf-8")
+    provider_config = {
+        "brainstormer": "gemini_api",
+        "reviewer": "anthropic_api",
+        "planner": "openai_api",
+        "executor": "claude-sonnet-5",
+        "code_reviewer": "gpt-5.5",
+        "fixer": "claude-sonnet-5",
+    }
+    expected = tmp_path / "expected.json"
+    expected.write_text(
+        json.dumps(
+            {
+                "version": "expected-attempts/v1",
+                "task_id": "C1-R",
+                "trial_id": "01",
+                "run_id": "99756532-a866-4e91-8480-47adac64778e",
+                "provider_config": provider_config,
+                "attempts": [
+                    {
+                        "task_id": "C1-R",
+                        "stage": "planner",
+                        "provider_id": "openai_api",
+                        "attempt": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "candidate-fragment.json"
+    command = [
+        sys.executable,
+        "scripts/run_dogfood_eval.py",
+        "local",
+        "--contract",
+        str(CONTRACT),
+        "--build-manifest",
+        str(manifest),
+        "--call-events",
+        str(events),
+        "--expected-attempts",
+        str(expected),
+        "--output",
+        str(output),
+    ]
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": "src"}
+
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+
+    assert result.returncode == 1
+    assert "four unique calls" in result.stderr
+    assert not output.exists()
 
 
 def test_contract_schema_files_are_strict_and_result_validator_rejects_content(

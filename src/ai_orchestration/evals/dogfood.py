@@ -328,22 +328,14 @@ def validate_call_events(
         )
         for expected in expected_attempts
     )
-    mismatched = {
-        identity: (expected_count, observed[identity])
-        for identity, expected_count in expected.items()
-        if observed[identity] != expected_count
-    }
-    if mismatched:
-        missing = sum(
-            expected_count - observed_count
-            for expected_count, observed_count in mismatched.values()
-            if observed_count < expected_count
-        )
+    if observed != expected:
+        missing = sum((expected - observed).values())
         if missing:
             raise ContractError(f"missing expected call events: {missing}")
-        raise ContractError(
-            f"call event counts do not match expected attempts: {len(mismatched)}"
-        )
+        unexpected = sum((observed - expected).values())
+        if unexpected:
+            raise ContractError(f"unexpected call events: {unexpected}")
+        raise ContractError("call event counts do not match expected attempts")
     return EventValidation(True, len(events))
 
 

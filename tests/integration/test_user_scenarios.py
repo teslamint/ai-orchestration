@@ -10,9 +10,11 @@ is tested across real subprocess boundaries, not simulated in-process.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -21,6 +23,9 @@ import ai_orchestration.cli as cli_module
 from ai_orchestration.cli import app
 from ai_orchestration.config import CatalogOutcome, CatalogStatus
 from ai_orchestration.engine.state import load_state
+from ai_orchestration.errors import ConfigError
+from ai_orchestration.evals.dogfood import validate_result
+from ai_orchestration.providers.call_events import CallRecorder, read_call_events
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 INSTALLED_SCRIPT = REPO_ROOT / ".venv" / "bin" / "ai-orchestration"
@@ -123,6 +128,210 @@ def test_run_routes_each_stage(tmp_path, monkeypatch):
     assert "opus-5" in calls["http"]
     assert "claude" in calls["cli"]
     assert (tmp_path / "s1_routing" / "hello.py").exists()
+
+
+def test_direct_vendor_stage_runs_full_cli_path_and_records_candidate_event(
+    tmp_path, monkeypatch
+):
+    probe_calls = []
+    direct_calls = []
+
+    class UsageProvider(_StubProvider):
+        usage_sink = None
+
+        def complete(self, prompt: str, *, system=None, **kwargs) -> str:
+            if self.usage_sink is not None:
+                self.usage_sink({"prompt_tokens": 11, "completion_tokens": 5})
+            return super().complete(prompt, system=system, **kwargs)
+
+    monkeypatch.setattr(
+        cli_module, "_http_provider_factory", lambda model: _StubProvider(model)
+    )
+    monkeypatch.setattr(
+        cli_module, "_cli_provider_factory", lambda binary: _StubProvider(binary)
+    )
+
+    def direct_factory(tool_type):
+        direct_calls.append(tool_type.value)
+        return UsageProvider(tool_type.value)
+
+    monkeypatch.setattr(cli_module, "_direct_vendor_provider_factory", direct_factory)
+    monkeypatch.setattr(cli_module, "validate_direct_vendor", lambda *_args: None)
+    monkeypatch.setattr(
+        cli_module,
+        "CallRecorder",
+        lambda path, *, run_id: CallRecorder(path, run_id=run_id, task_id="C1-R"),
+    )
+
+    def probe(*_args):
+        probe_calls.append(1)
+        return _reachable_catalog()
+
+    monkeypatch.setattr(cli_module, "_probe_catalog_for_startup", probe)
+
+    result = runner.invoke(
+        app,
+        [
+            "observe direct routing",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "candidate_direct",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--skip-review",
+            "--brainstormer",
+            "gemini_api",
+            "--reviewer",
+            "anthropic_api",
+            "--planner",
+            "openai_api",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert probe_calls == [1]
+    assert direct_calls == ["gemini_api", "anthropic_api", "openai_api"]
+    events = read_call_events(
+        tmp_path / "candidate_direct" / ".ai_orchestration" / "call_events.jsonl"
+    )
+    assert len(events) == 4
+    expected_identities = [
+        ("brainstormer", "direct_vendor", "gemini_api", 1),
+        ("reviewer", "direct_vendor", "anthropic_api", 1),
+        ("planner", "direct_vendor", "openai_api", 1),
+        ("executor", "proxy_model", "claude-sonnet-5", 1),
+    ]
+    assert [
+        (event.stage, event.provider_kind, event.provider_id, event.attempt)
+        for event in events
+    ] == expected_identities
+    assert all(
+        event.task_id == "C1-R" and event.outcome == "success" for event in events
+    )
+    assert [
+        (event.reported_input_tokens, event.reported_output_tokens)
+        for event in events[:3]
+    ] == [(11, 5), (11, 5), (11, 5)]
+
+    manifest = tmp_path / "candidate-build.json"
+    manifest.write_text(
+        json.dumps(
+            {"version": "build-manifest/v1", "commit": "c" * 40, "dirty": False}
+        ),
+        encoding="utf-8",
+    )
+    provider_config = {
+        "brainstormer": "gemini_api",
+        "reviewer": "anthropic_api",
+        "planner": "openai_api",
+        "executor": "claude-sonnet-5",
+        "code_reviewer": "gpt-5.5",
+        "fixer": "claude-sonnet-5",
+    }
+    expected_path = tmp_path / "expected-attempts.json"
+    expected_path.write_text(
+        json.dumps(
+            {
+                "version": "expected-attempts/v1",
+                "task_id": "C1-R",
+                "trial_id": "01",
+                "run_id": events[0].run_id,
+                "provider_config": provider_config,
+                "attempts": [
+                    {
+                        "task_id": "C1-R",
+                        "stage": stage,
+                        "provider_id": provider_id,
+                        "attempt": attempt,
+                    }
+                    for stage, _kind, provider_id, attempt in expected_identities
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    provider_digest = hashlib.sha256(
+        json.dumps(provider_config, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    fragment_path = tmp_path / "candidate-fragment.json"
+    local = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_dogfood_eval.py",
+            "local",
+            "--contract",
+            "evals/dogfood/v1",
+            "--build-manifest",
+            str(manifest),
+            "--call-events",
+            str(
+                tmp_path
+                / "candidate_direct"
+                / ".ai_orchestration"
+                / "call_events.jsonl"
+            ),
+            "--expected-attempts",
+            str(expected_path),
+            "--output",
+            str(fragment_path),
+        ],
+        cwd=REPO_ROOT,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert local.returncode == 0, local.stderr
+    fragment = validate_result(fragment_path)
+    assert fragment["provider_config_sha256"] == provider_digest
+    assert fragment["artifact_manifest"]["call_event_count"] == 4
+
+
+def test_mixed_missing_anthropic_fails_after_one_probe_without_provider_event(
+    tmp_path, monkeypatch
+):
+    probe_calls = []
+    vendor_calls = []
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_catalog_for_startup",
+        lambda *_args: probe_calls.append(1) or _reachable_catalog(),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "validate_direct_vendor",
+        lambda *_args: (_ for _ in ()).throw(
+            ConfigError("anthropic_api requires ANTHROPIC_API_KEY")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_direct_vendor_provider_factory",
+        lambda tool_type: vendor_calls.append(tool_type),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "missing vendor",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "missing_anthropic",
+            "--planner",
+            "anthropic_api",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "ANTHROPIC_API_KEY" in result.stdout
+    assert probe_calls == [1]
+    assert vendor_calls == []
+    assert not (
+        tmp_path / "missing_anthropic" / ".ai_orchestration" / "call_events.jsonl"
+    ).exists()
 
 
 # --- S2: command approval gate (Covers S2, Covers AE9) ----------------------
