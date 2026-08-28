@@ -73,6 +73,46 @@ def _fake_cli_factory(binary):
     return _FakeProvider(binary)
 
 
+def _install_direct_fakes(monkeypatch):
+    def direct_factory(tool_type):
+        return _FakeProvider(getattr(tool_type, "value", tool_type))
+
+    monkeypatch.setattr(cli_module, "_direct_vendor_provider_factory", direct_factory)
+    monkeypatch.setattr(
+        cli_module,
+        "validate_direct_vendor",
+        lambda *_args, **_kwargs: None,
+    )
+
+
+def test_direct_vendor_factory_forwards_exact_tool_type_and_active_gate(monkeypatch):
+    from ai_orchestration.providers.base import ToolType
+
+    gate = object()
+    sentinel = object()
+    observed = []
+
+    def create(tool_type, **kwargs):
+        observed.append((tool_type, kwargs))
+        return sentinel
+
+    monkeypatch.delenv(cli_module._FAKE_PROVIDERS_ENV_VAR, raising=False)
+    monkeypatch.setattr(cli_module, "_active_authorization_gate", gate)
+    monkeypatch.setattr(cli_module, "create_direct_vendor_provider", create)
+
+    result = cli_module._direct_vendor_provider_factory(ToolType.ANTHROPIC_API)
+
+    assert result is sentinel
+    assert observed == [(ToolType.ANTHROPIC_API, {"authorization_gate": gate})]
+
+
+def _stage_flags(value_by_stage):
+    flags = []
+    for stage_name, value in value_by_stage.items():
+        flags.extend(["--" + stage_name.replace("_", "-"), value])
+    return flags
+
+
 def test_fixer_extracts_fenced_code_before_writing(tmp_path, monkeypatch):
     from ai_orchestration.config import StageConfig
     from ai_orchestration.models.context import (
@@ -142,6 +182,122 @@ def test_command_logs_are_created_inside_project_workspace(tmp_path, monkeypatch
 def _install_fakes(monkeypatch):
     monkeypatch.setattr(cli_module, "_http_provider_factory", _fake_http_factory)
     monkeypatch.setattr(cli_module, "_cli_provider_factory", _fake_cli_factory)
+
+
+def test_direct_only_startup_skips_catalog_probe(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _install_direct_fakes(monkeypatch)
+    probe_calls = []
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_catalog_for_startup",
+        lambda *args: probe_calls.append(args),
+    )
+    values = {
+        name: ("gemini_api", "openai_api", "anthropic_api")[index % 3]
+        for index, name in enumerate(
+            [
+                "brainstormer",
+                "reviewer",
+                "planner",
+                "executor",
+                "code_reviewer",
+                "fixer",
+            ]
+        )
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "direct only",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "direct_only",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--skip-review",
+            *_stage_flags(values),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert probe_calls == []
+
+
+def test_mixed_startup_probes_catalog_once_and_warns_on_reserved_collision(
+    tmp_path, monkeypatch
+):
+    from ai_orchestration.config import CatalogOutcome, CatalogStatus
+
+    _install_fakes(monkeypatch)
+    _install_direct_fakes(monkeypatch)
+    probe_calls = []
+
+    def probe(*args):
+        probe_calls.append(args)
+        return CatalogStatus(
+            outcome=CatalogOutcome.REACHABLE_WITH_MODELS,
+            models=frozenset({"gpt-5.5", "openai_api"}),
+        )
+
+    monkeypatch.setattr(cli_module, "_probe_catalog_for_startup", probe)
+    values = {name: "openai_api" for name in cli_module._STAGE_FLAG_NAMES}
+    values["planner"] = "gpt-5.5"
+
+    with pytest.warns(Warning, match="openai_api"):
+        result = runner.invoke(
+            app,
+            [
+                "mixed",
+                "--workspace",
+                str(tmp_path),
+                "--project-name",
+                "mixed",
+                "--auto-select",
+                "--auto-run",
+                "--auto-approve",
+                "--skip-review",
+                *_stage_flags(values),
+            ],
+        )
+
+    assert result.exit_code == 0, result.stdout
+    assert len(probe_calls) == 1
+
+
+@pytest.mark.parametrize("primary", ["gpt-5.5", "codex", "openai_api"])
+@pytest.mark.parametrize("fallback", ["gemini_api", "openai_api", "anthropic_api"])
+def test_reserved_fallback_is_rejected_before_probe_for_all_primary_kinds(
+    tmp_path, monkeypatch, primary, fallback
+):
+    import ai_orchestration.config as config_module
+
+    _install_fakes(monkeypatch)
+    _install_direct_fakes(monkeypatch)
+    monkeypatch.setattr(config_module, "_default_binary_exists", lambda _name: True)
+    probe_calls = []
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_catalog_for_startup",
+        lambda *args: probe_calls.append(args),
+    )
+    config_path = tmp_path / f"{primary}-{fallback}.json"
+    config_path.write_text(
+        json.dumps({"planner": {"model": primary, "fallback_model": fallback}}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["goal", "--workspace", str(tmp_path), "--tool-config", str(config_path)],
+    )
+
+    assert result.exit_code != 0
+    assert fallback in result.stdout
+    assert probe_calls == []
 
 
 def test_fresh_v2_state_is_persisted_before_first_provider_call(tmp_path, monkeypatch):

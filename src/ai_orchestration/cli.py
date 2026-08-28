@@ -2,8 +2,8 @@
 
 Wires U1's config/routing, U2's models/prompts/utilities, U3's providers,
 and U4's engine into the six-stage pipeline. Every existing CLI option is
-preserved (§Interface). The six per-stage flags accept any proxy model id
-in addition to `agy|codex|claude`.
+preserved (§Interface). Each stage flag accepts a proxy model, an exact CLI
+binary, or one reserved direct-vendor literal.
 """
 
 from __future__ import annotations
@@ -21,13 +21,19 @@ from rich.console import Console
 from rich.panel import Panel
 
 from ai_orchestration.config import (
+    DIRECT_VENDOR_VALUES,
     CatalogOutcome,
     CatalogStatus,
     OrchestratorConfig,
     ProviderConfig,
+    SlotKind,
     StageConfig,
-    resolve_stage_config,
+    classify_slot,
+    requires_catalog_probe,
     resolve_workspace_base,
+    select_stage_config,
+    validate_stage_config,
+    warn_reserved_catalog_collisions,
 )
 from ai_orchestration.engine.gates import ApprovalGate, PausedRun, select_fix_items
 from ai_orchestration.engine.loops import (
@@ -60,6 +66,7 @@ from ai_orchestration.models.context import (
     Task,
 )
 from ai_orchestration.prompts.stages import AGENT_PROMPTS
+from ai_orchestration.providers.base import ToolType
 from ai_orchestration.providers.call_control import (
     AuthorizationGate,
     NoOpAuthorizationGate,
@@ -68,6 +75,10 @@ from ai_orchestration.providers.call_control import (
 from ai_orchestration.providers.call_events import CallRecorder
 from ai_orchestration.providers.cli import AgyProvider, ClaudeProvider, CodexProvider
 from ai_orchestration.providers.http import HttpProvider, probe_catalog
+from ai_orchestration.providers.legacy_api import (
+    create_direct_vendor_provider,
+    validate_direct_vendor,
+)
 from ai_orchestration.providers.routing import (
     complete_structured_with_fallback,
     complete_with_fallback,
@@ -182,6 +193,15 @@ def _cli_provider_factory(binary: str):
     return provider_class(authorization_gate=_active_authorization_gate)
 
 
+def _direct_vendor_provider_factory(tool_type: ToolType):
+    """Default direct-vendor factory with the active authorization gate."""
+    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR):
+        return _OfflineSmokeProvider()
+    return create_direct_vendor_provider(
+        tool_type, authorization_gate=_active_authorization_gate
+    )
+
+
 def _probe_catalog_for_startup(base_url: str, api_key: Optional[str]) -> CatalogStatus:
     """Default startup catalog probe: real network request."""
     if os.environ.get(_FAKE_PROVIDERS_ENV_VAR):
@@ -254,6 +274,7 @@ def _complete_stage_text(
         prompt,
         http_provider_factory=_http_provider_factory,
         cli_provider_factory=_cli_provider_factory,
+        direct_provider_factory=_direct_vendor_provider_factory,
         recorder=recorder,
         stage_name=event_stage,
         executor_step_id=executor_step_id,
@@ -285,6 +306,7 @@ def _complete_stage_structured(
         schema=schema,
         http_provider_factory=_http_provider_factory,
         cli_provider_factory=_cli_provider_factory,
+        direct_provider_factory=_direct_vendor_provider_factory,
         recorder=recorder,
         stage_name=event_stage,
         executor_step_id=executor_step_id,
@@ -514,12 +536,31 @@ def _run_ralph_wiggum_reviewer(
 # --- Startup validation ------------------------------------------------------
 
 
-def _resolve_and_validate_stage(
-    stage_name: str, cli_value: Optional[str], file_stages: dict, catalog: CatalogStatus
+def _select_stage(
+    stage_name: str, cli_value: Optional[str], file_stages: dict
 ) -> StageConfig:
     try:
-        return resolve_stage_config(
-            stage_name, cli_value=cli_value, file_stages=file_stages, catalog=catalog
+        return select_stage_config(
+            stage_name, cli_value=cli_value, file_stages=file_stages
+        )
+    except ConfigError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+def _validate_selected_stage(
+    stage_name: str,
+    stage: StageConfig,
+    catalog: CatalogStatus,
+    *,
+    validate_fallback_binary: bool,
+) -> None:
+    try:
+        validate_stage_config(
+            stage_name,
+            stage,
+            catalog,
+            validate_fallback_binary=validate_fallback_binary,
         )
     except (ConfigError, RoutingError) as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
@@ -657,15 +698,51 @@ def main(
     }
 
     provider_config = _resolve_provider_config(file_stages_raw)
-    catalog = _probe_catalog_for_startup(
-        provider_config.base_url, provider_config.api_key
-    )
+    stages: dict[str, StageConfig] = {
+        stage_name: _select_stage(stage_name, cli_value, file_stages_raw)
+        for stage_name, cli_value in stage_cli_values.items()
+    }
 
-    stages: dict[str, StageConfig] = {}
-    for stage_name, cli_value in stage_cli_values.items():
-        stages[stage_name] = _resolve_and_validate_stage(
-            stage_name, cli_value, file_stages_raw, catalog
+    for stage_name, stage in stages.items():
+        if stage.fallback_model in DIRECT_VENDOR_VALUES:
+            console.print(
+                "[bold red]Error:[/bold red] "
+                f"{stage_name}: fallback_model '{stage.fallback_model}' is reserved "
+                "for direct-vendor routing"
+            )
+            raise typer.Exit(code=1)
+
+    if requires_catalog_probe(stages):
+        catalog = _probe_catalog_for_startup(
+            provider_config.base_url, provider_config.api_key
         )
+        warn_reserved_catalog_collisions(catalog)
+    else:
+        catalog = CatalogStatus(outcome=CatalogOutcome.REACHABLE_WITHOUT_ID)
+
+    for stage_name, cli_value in stage_cli_values.items():
+        _validate_selected_stage(
+            stage_name,
+            stages[stage_name],
+            catalog,
+            validate_fallback_binary=(
+                cli_value is not None or stage_name in file_stages_raw
+            ),
+        )
+
+    try:
+        validated_direct_tools: set[ToolType] = set()
+        for stage in stages.values():
+            if classify_slot(stage.model) is not SlotKind.DIRECT_VENDOR:
+                continue
+            tool_type = ToolType(stage.model)
+            if tool_type in validated_direct_tools:
+                continue
+            validate_direct_vendor(tool_type, os.environ)
+            validated_direct_tools.add(tool_type)
+    except ConfigError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     debug_log_path = _resolve_debug_log_path(debug, debug_log)
 

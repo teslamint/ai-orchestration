@@ -35,6 +35,7 @@ from ai_orchestration.providers.http import HttpProvider
 
 HttpProviderFactory = Callable[[str], object]
 CliProviderFactory = Callable[[str], object]
+DirectProviderFactory = Callable[[object], object]
 
 
 def _error_kind(exc: BaseException) -> str:
@@ -91,14 +92,82 @@ def resolve_provider_chain(
     catalog: CatalogStatus,
     base_url: str,
     api_key: str | None,
+    direct_provider_factory: DirectProviderFactory | None = None,
 ):
     """Resolve `stage.model` to a concrete provider instance (no fallback logic)."""
     from ai_orchestration.providers.base import ToolType
     from ai_orchestration.providers.cli import LLMToolFactory
 
-    if classify_slot(stage.model) is SlotKind.BINARY:
+    kind = classify_slot(stage.model)
+    if kind is SlotKind.BINARY:
         return LLMToolFactory.create(ToolType(stage.model))
+    if kind is SlotKind.DIRECT_VENDOR:
+        if direct_provider_factory is None:
+            from ai_orchestration.providers.legacy_api import (
+                create_direct_vendor_provider,
+            )
+
+            direct_provider_factory = create_direct_vendor_provider
+        return direct_provider_factory(ToolType(stage.model))
     return HttpProvider(model=stage.model, base_url=base_url, api_key=api_key)
+
+
+def _complete_direct_with_binary_fallback(
+    stage: StageConfig,
+    prompt: str,
+    *,
+    method_name: str,
+    direct_provider_factory: DirectProviderFactory,
+    cli_provider_factory: CliProviderFactory,
+    recorder: CallRecorder | None,
+    stage_name: str | None,
+    executor_step_id: str | int | None,
+    call_kwargs: dict,
+):
+    from ai_orchestration.providers.base import ToolType
+
+    primary = direct_provider_factory(ToolType(stage.model))
+    try:
+        return (
+            _invoke_recorded(
+                primary,
+                method_name,
+                prompt,
+                recorder=recorder,
+                stage_name=stage_name,
+                provider_kind="direct_vendor",
+                provider_id=stage.model,
+                attempt_number=1,
+                call_kwargs=call_kwargs,
+                executor_step_id=executor_step_id,
+            ),
+            stage.model,
+        )
+    except TransportError as primary_exc:
+        if stage.fallback_binary is None:
+            raise
+        cli = cli_provider_factory(stage.fallback_binary)
+        try:
+            return (
+                _invoke_recorded(
+                    cli,
+                    method_name,
+                    prompt,
+                    recorder=recorder,
+                    stage_name=stage_name,
+                    provider_kind="cli_binary",
+                    provider_id=stage.fallback_binary,
+                    attempt_number=2,
+                    call_kwargs=call_kwargs,
+                    executor_step_id=executor_step_id,
+                ),
+                stage.fallback_binary,
+            )
+        except Exception as fallback_exc:
+            raise ProviderError(
+                f"{stage.model}: {primary_exc}; fallback_binary "
+                f"{stage.fallback_binary}: {fallback_exc}"
+            ) from fallback_exc
 
 
 def complete_with_fallback(
@@ -107,6 +176,7 @@ def complete_with_fallback(
     *,
     http_provider_factory: HttpProviderFactory,
     cli_provider_factory: CliProviderFactory,
+    direct_provider_factory: DirectProviderFactory | None = None,
     recorder: CallRecorder | None = None,
     stage_name: str | None = None,
     executor_step_id: str | int | None = None,
@@ -117,7 +187,8 @@ def complete_with_fallback(
     Returns `(content, provider_identifier)`. `provider_identifier` is the
     model id that actually answered, or the binary name for a CLI fallback.
     """
-    if classify_slot(stage.model) is SlotKind.BINARY:
+    kind = classify_slot(stage.model)
+    if kind is SlotKind.BINARY:
         provider = cli_provider_factory(stage.model)
         return (
             _invoke_recorded(
@@ -133,6 +204,24 @@ def complete_with_fallback(
                 executor_step_id=executor_step_id,
             ),
             stage.model,
+        )
+    if kind is SlotKind.DIRECT_VENDOR:
+        if direct_provider_factory is None:
+            from ai_orchestration.providers.legacy_api import (
+                create_direct_vendor_provider,
+            )
+
+            direct_provider_factory = create_direct_vendor_provider
+        return _complete_direct_with_binary_fallback(
+            stage,
+            prompt,
+            method_name="complete",
+            direct_provider_factory=direct_provider_factory,
+            cli_provider_factory=cli_provider_factory,
+            recorder=recorder,
+            stage_name=stage_name,
+            executor_step_id=executor_step_id,
+            call_kwargs=complete_kwargs,
         )
 
     primary = http_provider_factory(stage.model)
@@ -218,13 +307,15 @@ def complete_structured_with_fallback(
     schema: type[BaseModel],
     http_provider_factory: HttpProviderFactory,
     cli_provider_factory: CliProviderFactory,
+    direct_provider_factory: DirectProviderFactory | None = None,
     recorder: CallRecorder | None = None,
     stage_name: str | None = None,
     executor_step_id: str | int | None = None,
     **complete_kwargs,
 ) -> tuple[BaseModel, str]:
     """Structured-output counterpart of `complete_with_fallback`."""
-    if classify_slot(stage.model) is SlotKind.BINARY:
+    kind = classify_slot(stage.model)
+    if kind is SlotKind.BINARY:
         provider = cli_provider_factory(stage.model)
         return (
             _invoke_recorded(
@@ -240,6 +331,24 @@ def complete_structured_with_fallback(
                 executor_step_id=executor_step_id,
             ),
             stage.model,
+        )
+    if kind is SlotKind.DIRECT_VENDOR:
+        if direct_provider_factory is None:
+            from ai_orchestration.providers.legacy_api import (
+                create_direct_vendor_provider,
+            )
+
+            direct_provider_factory = create_direct_vendor_provider
+        return _complete_direct_with_binary_fallback(
+            stage,
+            prompt,
+            method_name="complete_structured",
+            direct_provider_factory=direct_provider_factory,
+            cli_provider_factory=cli_provider_factory,
+            recorder=recorder,
+            stage_name=stage_name,
+            executor_step_id=executor_step_id,
+            call_kwargs={"schema": schema, **complete_kwargs},
         )
 
     primary = http_provider_factory(stage.model)
