@@ -3,6 +3,7 @@ LLMToolConfig compatibility surface, and typed failure classification (U3).
 """
 
 import shutil
+from inspect import signature
 
 import pytest
 from pydantic import BaseModel
@@ -12,6 +13,7 @@ from ai_orchestration.providers.base import (
     AuthenticationError,
     CLIProviderError,
     ModelFaultError,
+    Provider,
     ProviderResult,
     StageRole,
     ToolType,
@@ -134,6 +136,112 @@ def test_http_provider_empty_choices_raises_model_fault(structured):
             provider.complete_structured("prompt", schema=_SimpleSchema)
         else:
             provider.complete("prompt")
+
+
+# --- Legacy direct-vendor Provider protocol and structured output (U3 Red) -
+
+
+def test_provider_protocol_structured_completion_preserves_optional_system_prompt():
+    parameters = signature(Provider.complete_structured).parameters
+    assert "system" in parameters
+    assert parameters["system"].default is None
+
+
+def test_legacy_adapter_satisfies_provider_and_uses_flat_schema_extraction(monkeypatch):
+    from ai_orchestration.providers import legacy_api
+    from ai_orchestration.providers.cli import LLMToolFactory
+    from ai_orchestration.providers.legacy_api import APIResponse
+
+    class Tool(legacy_api.APIBasedTool):
+        model = "gpt-test"
+
+        def __init__(self):
+            self.calls = []
+
+        def is_available(self):
+            return True
+
+        def generate(self, prompt, system_prompt=None):
+            self.calls.append((prompt, system_prompt))
+            return APIResponse(
+                content='result: {"items": [{"value": 9}]}',
+                finish_reason="stop",
+                usage={"prompt_tokens": 4, "completion_tokens": 2},
+            )
+
+        def generate_stream(self, prompt, system_prompt=None):
+            del prompt, system_prompt
+            yield ""
+
+    tool = Tool()
+    monkeypatch.setattr(
+        legacy_api,
+        "validate_direct_vendor",
+        lambda selected, environ: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        LLMToolFactory,
+        "create_api_tool",
+        staticmethod(lambda selected: tool),
+    )
+    factory = getattr(legacy_api, "create_direct_vendor_provider")
+    adapter = factory(ToolType.OPENAI_API)
+
+    result = adapter.complete_structured(
+        "return nested data", schema=_Outer, system="system rules"
+    )
+
+    assert isinstance(adapter, Provider)
+    assert result == _Outer(items=[_Inner(value=9)])
+    sent_prompt, sent_system = tool.calls[0]
+    assert "return nested data" in sent_prompt
+    assert '"properties"' in sent_prompt
+    assert '"items"' in sent_prompt
+    assert "$defs" not in sent_prompt
+    assert "$ref" not in sent_prompt
+    assert sent_system == "system rules"
+
+
+def test_legacy_adapter_reports_common_schema_validation_failure(monkeypatch):
+    from ai_orchestration.providers import legacy_api
+    from ai_orchestration.providers.cli import LLMToolFactory
+    from ai_orchestration.providers.legacy_api import APIResponse
+
+    class Tool(legacy_api.APIBasedTool):
+        model = "claude-test"
+
+        def is_available(self):
+            return True
+
+        def generate(self, prompt, system_prompt=None):
+            del prompt, system_prompt
+            return APIResponse(
+                content='{"items": [{"value": "not-an-integer"}]}',
+                finish_reason="stop",
+                usage={},
+            )
+
+        def generate_stream(self, prompt, system_prompt=None):
+            del prompt, system_prompt
+            yield ""
+
+    monkeypatch.setattr(
+        legacy_api,
+        "validate_direct_vendor",
+        lambda selected, environ: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        LLMToolFactory,
+        "create_api_tool",
+        staticmethod(lambda selected: Tool()),
+    )
+    factory = getattr(legacy_api, "create_direct_vendor_provider")
+    adapter = factory(ToolType.ANTHROPIC_API)
+
+    with pytest.raises(ModelFaultError, match="schema validation"):
+        adapter.complete_structured("return nested data", schema=_Outer)
 
 
 # --- flatten_json_schema -----------------------------------------------------
