@@ -106,6 +106,32 @@ def test_direct_vendor_factory_forwards_exact_tool_type_and_active_gate(monkeypa
     assert observed == [(ToolType.ANTHROPIC_API, {"authorization_gate": gate})]
 
 
+def test_test_control_requires_exact_fake_mode_before_use(tmp_path, monkeypatch):
+    from ai_orchestration.errors import ConfigError
+
+    tmp_path.chmod(0o700)
+    monkeypatch.setenv(cli_module._FAKE_PROVIDERS_ENV_VAR, "0")
+    monkeypatch.setenv(cli_module._TEST_CONTROL_DIR_ENV_VAR, str(tmp_path))
+
+    with pytest.raises(ConfigError, match="requires"):
+        cli_module._test_control_dir()
+
+
+def test_test_planner_barrier_rejects_symlinked_release(tmp_path, monkeypatch):
+    from ai_orchestration.errors import StateError
+
+    tmp_path.chmod(0o700)
+    target = tmp_path / "target"
+    target.touch()
+    (tmp_path / "holder.release").symlink_to(target)
+    monkeypatch.setenv(cli_module._FAKE_PROVIDERS_ENV_VAR, "1")
+    monkeypatch.setenv(cli_module._TEST_CONTROL_DIR_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(cli_module._TEST_ROLE_ENV_VAR, "holder")
+
+    with pytest.raises(StateError, match="release marker"):
+        cli_module._wait_at_test_planner_barrier("planner")
+
+
 def _stage_flags(value_by_stage):
     flags = []
     for stage_name, value in value_by_stage.items():

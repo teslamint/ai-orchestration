@@ -332,9 +332,58 @@ def _consume_result(receipt: Path) -> str:
 def test_cli_preflight_is_offline_and_live_commands_fail_closed(tmp_path):
     baseline = tmp_path / "baseline.json"
     candidate = tmp_path / "candidate.json"
-    manifest = {"version": "build-manifest/v1", "commit": "a" * 40, "dirty": False}
-    baseline.write_text(json.dumps(manifest), encoding="utf-8")
-    candidate.write_text(json.dumps({**manifest, "commit": "b" * 40}), encoding="utf-8")
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    baseline_result = tmp_path / "baseline-result.json"
+    baseline_result.write_text("{}", encoding="utf-8")
+    baseline_command = "offline baseline command"
+    baseline.write_text(
+        json.dumps(
+            {
+                "version": "baseline-manifest/v1",
+                "commit": commit,
+                "tree": tree,
+                "source_archive_sha256": "a" * 64,
+                "contract_archive_sha256": "b" * 64,
+                "command": baseline_command,
+                "command_sha256": hashlib.sha256(baseline_command.encode()).hexdigest(),
+                "result": baseline_result.name,
+                "result_sha256": hashlib.sha256(
+                    baseline_result.read_bytes()
+                ).hexdigest(),
+                "provider_config_sha256": "c" * 64,
+                "dirty": False,
+                "tracked_clean_before": True,
+                "tracked_clean_after": True,
+                "network_calls": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands = {"focused": "focused command", "full": "full command"}
+    candidate_manifest = {
+        "version": "candidate-manifest/v1",
+        "commit": commit,
+        "tree": tree,
+        "dirty": False,
+        "contract_sha256": hashlib.sha256(
+            (CONTRACT / "dataset.json").read_bytes()
+        ).hexdigest(),
+        "commands": commands,
+        "command_sha256": {
+            name: hashlib.sha256(command.encode()).hexdigest()
+            for name, command in commands.items()
+        },
+        "output_root": str(tmp_path),
+    }
+    candidate.write_text(json.dumps(candidate_manifest), encoding="utf-8")
     command = [
         sys.executable,
         "scripts/run_dogfood_eval.py",
@@ -349,8 +398,26 @@ def test_cli_preflight_is_offline_and_live_commands_fail_closed(tmp_path):
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": "src"}
     result = subprocess.run(command, text=True, capture_output=True, env=env)
     assert result.returncode == 0
-    assert json.loads(result.stdout)["adapter_eligibility"] == "open"
-    assert json.loads(result.stdout)["authorization_gate"] == "ready"
+    preflight = json.loads(result.stdout)
+    assert preflight["adapter_eligibility"] == "open"
+    assert preflight["authorization_gate"] == "ready"
+    assert preflight["candidate_tree"] == tree
+    assert preflight["command_sha256"] == candidate_manifest["command_sha256"]
+    assert preflight["output_root"] == candidate_manifest["output_root"]
+    assert preflight["network_calls"] == 0
+
+    candidate_manifest["commit"] = tree
+    candidate.write_text(json.dumps(candidate_manifest), encoding="utf-8")
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 1
+    assert "commit object" in result.stderr
+
+    candidate_manifest["commit"] = commit
+    candidate_manifest["contract_sha256"] = "0" * 64
+    candidate.write_text(json.dumps(candidate_manifest), encoding="utf-8")
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 1
+    assert "contract digest" in result.stderr
 
     result = subprocess.run(
         [sys.executable, "scripts/run_dogfood_eval.py", "pilot"],
@@ -359,7 +426,7 @@ def test_cli_preflight_is_offline_and_live_commands_fail_closed(tmp_path):
         env=env,
     )
     assert result.returncode == 1
-    assert "receipt" in result.stderr.lower()
+    assert "adapter_eligibility is open" in result.stderr
 
 
 def test_cli_local_writes_private_output_and_rejects_symlinked_root(tmp_path):

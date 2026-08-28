@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
+import time
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -66,7 +69,7 @@ from ai_orchestration.models.context import (
     Task,
 )
 from ai_orchestration.prompts.stages import AGENT_PROMPTS
-from ai_orchestration.providers.base import ToolType
+from ai_orchestration.providers.base import ToolType, TransportError
 from ai_orchestration.providers.call_control import (
     AuthorizationGate,
     NoOpAuthorizationGate,
@@ -109,6 +112,114 @@ _CLI_PROVIDER_CLASSES: dict[str, type] = {
 # U6's integration suite is the only consumer that needs the real network;
 # this keeps U5's own smoke test (subprocess-launched) offline too.
 _FAKE_PROVIDERS_ENV_VAR = "AI_ORCHESTRATION_FAKE_PROVIDERS"
+_TEST_CONTROL_DIR_ENV_VAR = "AI_ORCHESTRATION_TEST_CONTROL_DIR"
+_TEST_ROLE_ENV_VAR = "AI_ORCHESTRATION_TEST_ROLE"
+_active_test_stage: ContextVar[str | None] = ContextVar(
+    "active_test_stage", default=None
+)
+
+
+def _test_control_dir() -> Path | None:
+    value = os.environ.get(_TEST_CONTROL_DIR_ENV_VAR)
+    if value is None:
+        return None
+    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR) != "1":
+        raise ConfigError(
+            f"{_TEST_CONTROL_DIR_ENV_VAR} requires {_FAKE_PROVIDERS_ENV_VAR}=1"
+        )
+    control = Path(value)
+    try:
+        metadata = control.lstat()
+    except OSError as exc:
+        raise ConfigError("test control directory is unavailable") from exc
+    if (
+        control.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise ConfigError("test control directory must be a non-symlink mode 0700")
+    return control
+
+
+def _test_role() -> str:
+    role = os.environ.get(_TEST_ROLE_ENV_VAR)
+    if role not in {"holder", "contender", "resumer"}:
+        raise ConfigError("test process role is invalid")
+    return role
+
+
+def _open_control_file(path: Path, flags: int) -> int:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags | no_follow, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise StateError("test control file must be regular")
+    return fd
+
+
+def _record_test_provider_call(stage: str) -> None:
+    control = _test_control_dir()
+    if control is None:
+        return
+    role = _test_role()
+    path = control / f"{role}.provider.jsonl"
+    try:
+        fd = _open_control_file(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        try:
+            event = json.dumps(
+                {"role": role, "stage": stage, "pid": os.getpid()},
+                separators=(",", ":"),
+            )
+            os.write(fd, f"{event}\n".encode())
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise StateError("could not write the test provider spy") from exc
+
+
+def _wait_at_test_planner_barrier(stage: str) -> None:
+    control = _test_control_dir()
+    if control is None or stage != "planner":
+        return
+    role = _test_role()
+    ready = control / f"{role}.ready"
+    release = control / f"{role}.release"
+    try:
+        fd = _open_control_file(ready, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            event = json.dumps(
+                {"role": role, "stage": stage, "pid": os.getpid()},
+                separators=(",", ":"),
+            )
+            os.write(fd, event.encode())
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise StateError("could not publish the test planner barrier") from exc
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            fd = _open_control_file(release, os.O_RDONLY)
+        except FileNotFoundError:
+            fd = None
+        except OSError as exc:
+            raise StateError("test planner release marker is invalid") from exc
+        if fd is not None:
+            os.close(fd)
+            break
+        if time.monotonic() >= deadline:
+            raise StateError("test planner barrier timed out")
+        time.sleep(0.02)
+    failure = control / f"{role}.fail"
+    try:
+        fd = _open_control_file(failure, os.O_RDONLY)
+    except FileNotFoundError:
+        fd = None
+    except OSError as exc:
+        raise StateError("test provider failure marker is invalid") from exc
+    if fd is not None:
+        os.close(fd)
+        raise TransportError("test provider failure")
 
 
 class _OfflineSmokeProvider:
@@ -117,12 +228,22 @@ class _OfflineSmokeProvider:
     """
 
     def complete(self, prompt: str, *, system=None, **kwargs) -> str:
+        stage = _active_test_stage.get()
+        if stage is None:
+            raise StateError("fake provider stage is unavailable")
+        _record_test_provider_call(stage)
+        _wait_at_test_planner_barrier(stage)
         return (
             '[{"step_id": 1, "file_path": "hello.py", '
             '"action_type": "create_file", "instruction": "write hello world"}]'
         )
 
     def complete_structured(self, prompt: str, *, schema, **kwargs):
+        stage = _active_test_stage.get()
+        if stage is None:
+            raise StateError("fake provider stage is unavailable")
+        _record_test_provider_call(stage)
+        _wait_at_test_planner_barrier(stage)
         values = {}
         for field_name, field_info in schema.model_fields.items():
             if not field_info.is_required():
@@ -175,7 +296,7 @@ def _authorization_gate_from_environment(environ: dict[str, str]) -> Authorizati
 
 def _http_provider_factory(model: str):
     """Default HTTP provider factory: real CLIProxyAPI via the resolved endpoint."""
-    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR):
+    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR) == "1":
         return _OfflineSmokeProvider()
     return HttpProvider(
         model=model,
@@ -187,7 +308,7 @@ def _http_provider_factory(model: str):
 
 def _cli_provider_factory(binary: str):
     """Default CLI provider factory: real subprocess provider for `binary`."""
-    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR):
+    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR) == "1":
         return _OfflineSmokeProvider()
     provider_class = _CLI_PROVIDER_CLASSES[binary]
     return provider_class(authorization_gate=_active_authorization_gate)
@@ -195,7 +316,7 @@ def _cli_provider_factory(binary: str):
 
 def _direct_vendor_provider_factory(tool_type: ToolType):
     """Default direct-vendor factory with the active authorization gate."""
-    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR):
+    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR) == "1":
         return _OfflineSmokeProvider()
     return create_direct_vendor_provider(
         tool_type, authorization_gate=_active_authorization_gate
@@ -204,7 +325,7 @@ def _direct_vendor_provider_factory(tool_type: ToolType):
 
 def _probe_catalog_for_startup(base_url: str, api_key: Optional[str]) -> CatalogStatus:
     """Default startup catalog probe: real network request."""
-    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR):
+    if os.environ.get(_FAKE_PROVIDERS_ENV_VAR) == "1":
         return CatalogStatus(
             outcome=CatalogOutcome.REACHABLE_WITH_MODELS,
             models=frozenset(
@@ -269,17 +390,21 @@ def _complete_stage_text(
         if "reviewer" in stage_name and stage_name != "code_reviewer"
         else stage_name
     )
-    text, _provider_used = complete_with_fallback(
-        stage,
-        prompt,
-        http_provider_factory=_http_provider_factory,
-        cli_provider_factory=_cli_provider_factory,
-        direct_provider_factory=_direct_vendor_provider_factory,
-        recorder=recorder,
-        stage_name=event_stage,
-        executor_step_id=executor_step_id,
-        system=AGENT_PROMPTS[stage_name].get("system", ""),
-    )
+    token = _active_test_stage.set(event_stage)
+    try:
+        text, _provider_used = complete_with_fallback(
+            stage,
+            prompt,
+            http_provider_factory=_http_provider_factory,
+            cli_provider_factory=_cli_provider_factory,
+            direct_provider_factory=_direct_vendor_provider_factory,
+            recorder=recorder,
+            stage_name=event_stage,
+            executor_step_id=executor_step_id,
+            system=AGENT_PROMPTS[stage_name].get("system", ""),
+        )
+    finally:
+        _active_test_stage.reset(token)
     _write_debug_log(debug, debug_log_path, f"{stage_name} raw output", text)
     return text
 
@@ -300,18 +425,22 @@ def _complete_stage_structured(
         if "reviewer" in stage_name and stage_name != "code_reviewer"
         else stage_name
     )
-    result, _provider_used = complete_structured_with_fallback(
-        stage,
-        prompt,
-        schema=schema,
-        http_provider_factory=_http_provider_factory,
-        cli_provider_factory=_cli_provider_factory,
-        direct_provider_factory=_direct_vendor_provider_factory,
-        recorder=recorder,
-        stage_name=event_stage,
-        executor_step_id=executor_step_id,
-        system=AGENT_PROMPTS[stage_name].get("system", ""),
-    )
+    token = _active_test_stage.set(event_stage)
+    try:
+        result, _provider_used = complete_structured_with_fallback(
+            stage,
+            prompt,
+            schema=schema,
+            http_provider_factory=_http_provider_factory,
+            cli_provider_factory=_cli_provider_factory,
+            direct_provider_factory=_direct_vendor_provider_factory,
+            recorder=recorder,
+            stage_name=event_stage,
+            executor_step_id=executor_step_id,
+            system=AGENT_PROMPTS[stage_name].get("system", ""),
+        )
+    finally:
+        _active_test_stage.reset(token)
     _write_debug_log(
         debug, debug_log_path, f"{stage_name} structured output", repr(result)
     )
@@ -990,6 +1119,11 @@ def _run(
             if _is_tty() and not config.auto_select
             else None,
         )
+        if os.environ.get(_TEST_CONTROL_DIR_ENV_VAR):
+            _test_control_dir()
+            save_state(
+                _state_snapshot(current_stage="planner", pause_reason=None), state_path
+            )
     _gated_run_stage(
         "planner",
         lambda: _run_planner(context, config.stages["planner"], **stage_kwargs),

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -18,7 +19,6 @@ from ai_orchestration.config import SlotKind, classify_slot
 from ai_orchestration.evals.dogfood import (
     ContractError,
     ExpectedAttempt,
-    consume_receipt,
     load_eval_contract,
     validate_call_events,
     validate_result,
@@ -122,6 +122,143 @@ def _manifest(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _is_hex(value: object, length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _verify_git_identity(commit: str, tree: str) -> None:
+    try:
+        object_type = subprocess.run(
+            ["git", "cat-file", "-t", commit],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if object_type.stdout.strip() != "commit":
+            raise ContractError("manifest commit must identify a commit object")
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{commit}^{{tree}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except ContractError:
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ContractError(f"manifest commit does not exist: {commit}") from exc
+    if result.stdout.strip() != tree:
+        raise ContractError("manifest tree does not match commit")
+
+
+def _baseline_manifest(path: Path) -> dict[str, Any]:
+    payload = _object(path)
+    expected = {
+        "version",
+        "commit",
+        "tree",
+        "source_archive_sha256",
+        "contract_archive_sha256",
+        "command",
+        "command_sha256",
+        "result",
+        "result_sha256",
+        "provider_config_sha256",
+        "dirty",
+        "tracked_clean_before",
+        "tracked_clean_after",
+        "network_calls",
+    }
+    if set(payload) != expected or payload["version"] != "baseline-manifest/v1":
+        raise ContractError(f"baseline manifest has an unexpected shape: {path}")
+    hex_fields = (
+        "source_archive_sha256",
+        "contract_archive_sha256",
+        "command_sha256",
+        "result_sha256",
+        "provider_config_sha256",
+    )
+    if (
+        not _is_hex(payload["commit"], 40)
+        or not _is_hex(payload["tree"], 40)
+        or not all(_is_hex(payload[name], 64) for name in hex_fields)
+        or payload["dirty"] is not False
+        or payload["tracked_clean_before"] is not True
+        or payload["tracked_clean_after"] is not True
+        or payload["network_calls"] != 0
+        or not isinstance(payload["command"], str)
+        or not isinstance(payload["result"], str)
+        or Path(payload["result"]).name != payload["result"]
+    ):
+        raise ContractError(f"baseline manifest is incomplete: {path}")
+    if (
+        hashlib.sha256(payload["command"].encode()).hexdigest()
+        != payload["command_sha256"]
+    ):
+        raise ContractError("baseline command digest does not match")
+    result_path = path.parent / payload["result"]
+    if result_path.is_symlink():
+        raise ContractError("baseline result must not be a symlink")
+    if _digest(result_path) != payload["result_sha256"]:
+        raise ContractError("baseline result digest does not match")
+    _verify_git_identity(payload["commit"], payload["tree"])
+    return payload
+
+
+def _candidate_manifest(path: Path, contract_path: Path) -> dict[str, Any]:
+    payload = _object(path)
+    if set(payload) != {
+        "version",
+        "commit",
+        "tree",
+        "dirty",
+        "contract_sha256",
+        "commands",
+        "command_sha256",
+        "output_root",
+    }:
+        raise ContractError(f"candidate manifest has an unexpected shape: {path}")
+    commands = payload["commands"]
+    command_digests = payload["command_sha256"]
+    output_root = payload["output_root"]
+    if (
+        payload["version"] != "candidate-manifest/v1"
+        or not _is_hex(payload["commit"], 40)
+        or not _is_hex(payload["tree"], 40)
+        or payload["dirty"] is not False
+        or not _is_hex(payload["contract_sha256"], 64)
+        or not isinstance(commands, dict)
+        or set(commands) != {"focused", "full"}
+        or not all(isinstance(value, str) and value for value in commands.values())
+        or not isinstance(command_digests, dict)
+        or set(command_digests) != set(commands)
+        or not all(_is_hex(value, 64) for value in command_digests.values())
+        or not isinstance(output_root, str)
+    ):
+        raise ContractError(f"candidate manifest is incomplete: {path}")
+    declared_root = Path(output_root)
+    if (
+        not declared_root.is_absolute()
+        or declared_root.resolve() != path.parent.resolve()
+    ):
+        raise ContractError(
+            "candidate output_root must match its external evidence root"
+        )
+    _reject_symlink_components(declared_root)
+    if payload["contract_sha256"] != _digest(contract_path / "dataset.json"):
+        raise ContractError("candidate manifest contract digest does not match")
+    for name, command in commands.items():
+        if hashlib.sha256(command.encode()).hexdigest() != command_digests[name]:
+            raise ContractError(f"candidate {name} command digest does not match")
+    _verify_git_identity(payload["commit"], payload["tree"])
+    return payload
+
+
 def _private_write(path: Path, payload: dict[str, Any]) -> None:
     path = path.absolute()
     _reject_symlink_components(path)
@@ -157,8 +294,8 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
         args, "contract", "baseline_manifest", "candidate_manifest"
     )
     contract = load_eval_contract(contract_path)
-    baseline = _manifest(baseline_path)
-    candidate = _manifest(candidate_path)
+    baseline = _baseline_manifest(baseline_path)
+    candidate = _candidate_manifest(candidate_path, contract_path)
     return {
         "version": "dogfood-preflight/v1",
         "adapter_eligibility": "open",
@@ -166,6 +303,9 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
         "contract": contract.version,
         "baseline_commit": baseline["commit"],
         "candidate_commit": candidate["commit"],
+        "candidate_tree": candidate["tree"],
+        "command_sha256": candidate["command_sha256"],
+        "output_root": candidate["output_root"],
         "network_calls": 0,
     }
 
@@ -177,8 +317,8 @@ def _approval_packet(args: argparse.Namespace) -> dict[str, Any]:
     if args.scope not in {"pilot", "full"}:
         raise ContractError("approval-packet scope must be pilot or full")
     load_eval_contract(contract_path)
-    baseline = _manifest(baseline_path)
-    candidate = _manifest(candidate_path)
+    baseline = _baseline_manifest(baseline_path)
+    candidate = _candidate_manifest(candidate_path, contract_path)
     packet = {
         "version": "approval-packet/v1",
         "scope": args.scope,
@@ -194,24 +334,7 @@ def _approval_packet(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _live(args: argparse.Namespace) -> dict[str, Any]:
-    receipt_path, packet_path, _state_path = _required(
-        args, "receipt", "packet", "state"
-    )
-    packet = _object(packet_path)
-    expected_scope = (
-        "invocation" if args.command == "authorize-invocation" else args.command
-    )
-    if packet.get("scope") != expected_scope:
-        raise ContractError("packet scope does not match command")
-    session_id = packet.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        raise ContractError("packet does not contain a session identifier")
-    consume_receipt(
-        receipt_path,
-        _digest(packet_path),
-        session_id,
-        expected_scope=expected_scope,
-    )
+    del args
     raise ContractError("adapter_eligibility is open; live model execution is disabled")
 
 
