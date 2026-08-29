@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +20,7 @@ from ai_orchestration.evals.prompt_measurement import (
 from ai_orchestration.providers.call_events import CallEvent, CallEventError
 
 RUN_ID = "99756532-a866-4e91-8480-47adac64778e"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _events(*, prompt_delta: int = 0, metadata_delta: int = 0) -> list[CallEvent]:
@@ -170,3 +175,81 @@ def test_measurement_writes_private_deterministic_report(tmp_path):
     assert output.stat().st_mode & 0o777 == 0o600
     assert hashlib.sha256(data).hexdigest() in output.read_text(encoding="utf-8")
     assert "secret prompt" not in output.read_text(encoding="utf-8")
+
+
+def _measure_command(source: Path, output: Path) -> list[str]:
+    return [
+        sys.executable,
+        "scripts/measure_prompt_payloads.py",
+        "--call-events",
+        str(source),
+        "--output",
+        str(output),
+    ]
+
+
+def test_measure_command_writes_private_stable_report(tmp_path):
+    source = tmp_path / "call_events.jsonl"
+    output = tmp_path / "measurement.json"
+    _write_events(source, _events())
+
+    first = subprocess.run(
+        _measure_command(source, output),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+    )
+    assert first.returncode == 0, first.stderr
+    first_bytes = output.read_bytes()
+    second = subprocess.run(
+        _measure_command(source, output),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert output.read_bytes() == first_bytes
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert json.loads(first.stdout)["decision"] == "no-migration"
+
+
+def test_measure_command_rejects_invalid_input_without_publishing(tmp_path):
+    source = tmp_path / "invalid.jsonl"
+    output = tmp_path / "measurement.json"
+    source.write_text("not-json\n", encoding="utf-8")
+
+    result = subprocess.run(
+        _measure_command(source, output),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+    )
+
+    assert result.returncode == 1
+    assert "invalid" in result.stderr.lower()
+    assert not output.exists()
+
+
+def test_measure_command_rejects_output_symlink_without_touching_target(tmp_path):
+    source = tmp_path / "call_events.jsonl"
+    target = tmp_path / "target.json"
+    output = tmp_path / "measurement.json"
+    _write_events(source, _events())
+    target.write_text("keep", encoding="utf-8")
+    output.symlink_to(target)
+
+    result = subprocess.run(
+        _measure_command(source, output),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+    )
+
+    assert result.returncode == 1
+    assert "symlink" in result.stderr.lower()
+    assert target.read_text(encoding="utf-8") == "keep"
