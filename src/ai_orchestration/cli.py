@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.panel import Panel
 
+from ai_orchestration.compound_loop import CompoundLoopAdapter
 from ai_orchestration.config import (
     DIRECT_VENDOR_VALUES,
     CatalogOutcome,
@@ -830,6 +831,21 @@ def main(
     resume: bool = typer.Option(
         False, "--resume", help="이전에 중단된 실행을 이어서 재개 (기본값: 새로 시작)"
     ),
+    compound_loop_path: Optional[Path] = typer.Option(
+        None,
+        "--compound-loop-path",
+        help="검증할 compound-loop checkout 경로 (opt-in)",
+    ),
+    compound_loop_manifest: Optional[Path] = typer.Option(
+        None,
+        "--compound-loop-manifest",
+        help="compound-loop 계약 매니페스트 JSON 경로",
+    ),
+    compound_loop_plan: Optional[Path] = typer.Option(
+        None,
+        "--compound-loop-plan",
+        help="검증할 sealed plan/v1 문서 경로",
+    ),
 ) -> None:
     """
     AI Orchestration Tool (6-Stage):
@@ -933,6 +949,9 @@ def main(
         ralph_wiggum_max_iterations=ralph_wiggum_max_iterations,
         ralph_wiggum_completion_promise=completion_promise,
         ralph_wiggum_state_file=ralph_wiggum_state_file,
+        compound_loop_path=compound_loop_path,
+        compound_loop_manifest=compound_loop_manifest,
+        compound_loop_plan=compound_loop_plan,
     )
 
     if config.debug:
@@ -1016,6 +1035,28 @@ def _run(
     )
 
     resuming_existing = resume and state_path.exists()
+    compound_adapter = None
+    if config.compound_loop_path is not None:
+        if config.compound_loop_manifest is None:
+            raise OrchestrationError(
+                "--compound-loop-manifest is required with --compound-loop-path"
+            )
+        compound_adapter = CompoundLoopAdapter.prepare(
+            config.compound_loop_path,
+            config.compound_loop_manifest,
+            config.workspace_path / ".release-loop" / "progress.md",
+            plan_path=config.compound_loop_plan,
+            resume=resume,
+        )
+    elif (
+        config.compound_loop_manifest is not None
+        or config.compound_loop_plan is not None
+    ):
+        raise OrchestrationError(
+            "--compound-loop-manifest and --compound-loop-plan require "
+            "--compound-loop-path"
+        )
+
     try:
         run_state = resolve_run_start(state_path, resume=resume)
     except StateError as exc:
@@ -1123,10 +1164,20 @@ def _run(
     def _gated_run_stage(stage_name: str, runner: Callable[[], None]) -> None:
         if stage_name in run_state.completed_stages:
             return
+        compound_stage = {
+            "brainstormer": "brainstormer",
+            "brainstorming_reviewer": "brainstorming_reviewer",
+            "planner": "planner",
+            "executor": "executor",
+        }.get(stage_name)
+        if compound_adapter is not None and compound_stage is not None:
+            compound_adapter.begin_stage(compound_stage)
         try:
             runner()
         except PausedRun as exc:
             _pause(stage_name, exc)
+        if compound_adapter is not None and compound_stage is not None:
+            compound_adapter.complete_stage(compound_stage)
         run_state.completed_stages.append(stage_name)
         save_state(_state_snapshot(current_stage=None, pause_reason=None), state_path)
 
@@ -1206,10 +1257,18 @@ def _run(
     if not config.skip_review:
 
         def _run_review(ctx):
+            if compound_adapter is not None:
+                compound_adapter.begin_stage("code_reviewer")
             _run_code_reviewer(ctx, config.stages["code_reviewer"], **stage_kwargs)
+            if compound_adapter is not None:
+                compound_adapter.complete_stage("code_reviewer")
 
         def _run_fix(ctx, item):
+            if compound_adapter is not None:
+                compound_adapter.begin_stage("fixer")
             _run_fixer(ctx, config.stages["fixer"], item, **stage_kwargs)
+            if compound_adapter is not None:
+                compound_adapter.complete_stage("fixer")
 
         def _select(items):
             if config.auto_fix:
@@ -1223,17 +1282,19 @@ def _run(
             choice = typer.prompt("Enter your choice", default="a")
             return select_fix_items(items, choice=choice, auto_fix=False)
 
-        _gated_run_stage(
-            "review_fix",
-            lambda: run_main_review_fix_loop(
+        def _run_review_fix() -> None:
+            run_main_review_fix_loop(
                 context,
                 run_review=_run_review,
                 run_fix=_run_fix,
                 max_fix_iterations=config.max_fix_iterations,
                 auto_fix=config.auto_fix,
                 select_items=_select,
-            ),
-        )
+            )
+            if compound_adapter is not None:
+                compound_adapter.complete_optional_stage("fixer")
+
+        _gated_run_stage("review_fix", _run_review_fix)
 
     if config.enable_ralph_wiggum:
         _gated_run_stage(
@@ -1252,6 +1313,9 @@ def _run(
                 ),
             ),
         )
+
+    if compound_adapter is not None and not config.skip_review:
+        compound_adapter.complete_implementation()
 
     _write_producer_manifest(
         state_path,

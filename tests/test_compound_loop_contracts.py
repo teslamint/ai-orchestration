@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from ai_orchestration.compound_loop import (
+    CompoundLoopAdapter,
     ContractError,
     LedgerError,
     ReleaseLoopState,
@@ -276,3 +277,139 @@ def test_ledger_rejects_malformed_state_and_ship_retro_actions(tmp_path):
         next_transition(ReleaseLoopState("ship", "in-progress"), "merge")
     with pytest.raises(LedgerError, match="external"):
         next_transition(ReleaseLoopState("retro", "in-progress"), "archive")
+
+
+class _CliProvider:
+    def complete(self, prompt, *, system=None, **kwargs):
+        return (
+            '[{"step_id": 1, "file_path": "hello.py", '
+            '"action_type": "create_file", "instruction": "write hello"}]'
+        )
+
+    def complete_structured(self, prompt, *, schema, **kwargs):
+        values = {}
+        for field_name, field_info in schema.model_fields.items():
+            if not field_info.is_required():
+                continue
+            annotation = str(field_info.annotation)
+            if field_name in {"step_id", "total_files_reviewed"}:
+                values[field_name] = 1
+            elif field_name == "requires_fixes":
+                values[field_name] = False
+            elif annotation.startswith("typing.List") or annotation.startswith("list"):
+                values[field_name] = []
+            else:
+                values[field_name] = "x"
+        return schema(**values)
+
+    def is_available(self):
+        return True
+
+
+def test_adapter_resume_preserves_next_model_stage(tmp_path):
+    root, contents = _make_source(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, root, contents)
+    ledger = tmp_path / ".release-loop" / "progress.md"
+
+    adapter = CompoundLoopAdapter.prepare(root, manifest, ledger)
+    for stage in ("brainstormer", "brainstorming_reviewer"):
+        assert adapter.begin_stage(stage)
+        adapter.complete_stage(stage)
+
+    resumed = CompoundLoopAdapter.prepare(root, manifest, ledger, resume=True)
+
+    assert resumed.next_stage == "planner"
+    assert not resumed.begin_stage("brainstormer")
+    assert resumed.begin_stage("planner")
+
+
+def test_cli_opt_in_preflight_persists_phase_without_changing_stage_order(
+    tmp_path, monkeypatch
+):
+    from typer.testing import CliRunner
+
+    import ai_orchestration.cli as cli_module
+    from ai_orchestration.config import CatalogOutcome, CatalogStatus
+
+    root, contents = _make_source(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, root, contents)
+    plan = tmp_path / "plan.md"
+    _sealed_plan(plan)
+
+    monkeypatch.setattr(
+        cli_module, "_http_provider_factory", lambda model: _CliProvider()
+    )
+    monkeypatch.setattr(
+        cli_module, "_cli_provider_factory", lambda binary: _CliProvider()
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_catalog_for_startup",
+        lambda *args, **kwargs: CatalogStatus(
+            outcome=CatalogOutcome.REACHABLE_WITH_MODELS,
+            models=frozenset({"gemini-3.1-pro-low", "gpt-5.5", "claude-sonnet-5"}),
+        ),
+    )
+    monkeypatch.setattr(cli_module, "_is_tty", lambda: False)
+
+    result = CliRunner().invoke(
+        cli_module.app,
+        [
+            "build hello",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "compound_cli",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--skip-review",
+            "--compound-loop-path",
+            str(root),
+            "--compound-loop-manifest",
+            str(manifest),
+            "--compound-loop-plan",
+            str(plan),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    state = load_ledger(tmp_path / "compound_cli" / ".release-loop" / "progress.md")
+    assert state is not None
+    assert state.phase == "implement"
+    assert state.completed_stages == (
+        "brainstormer",
+        "brainstorming_reviewer",
+        "planner",
+        "executor",
+    )
+    assert state.next_stage == "code_reviewer"
+
+
+def test_cli_opt_in_rejects_missing_source_before_release_ledger_write(tmp_path):
+    from typer.testing import CliRunner
+
+    import ai_orchestration.cli as cli_module
+
+    result = CliRunner().invoke(
+        cli_module.app,
+        [
+            "build hello",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "compound_missing",
+            "--compound-loop-path",
+            str(tmp_path / "missing-source"),
+            "--compound-loop-manifest",
+            str(tmp_path / "manifest.json"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "contract source root" in result.stdout
+    assert not (
+        tmp_path / "compound_missing" / ".release-loop" / "progress.md"
+    ).exists()
