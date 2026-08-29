@@ -70,6 +70,25 @@ def test_validate_plan_rejects_duplicate_identity_workspace_and_invalid_limit(
             validate_plan(plan)
 
 
+def test_validate_plan_rejects_string_argv_and_non_directory_parent(tmp_path):
+    with pytest.raises(SupervisionValidationError, match="command"):
+        validate_plan(
+            SupervisionPlan(
+                (RunSpec("string-argv", "echo", tmp_path / "workspace"),),
+                max_concurrency=1,
+            )
+        )
+    parent = tmp_path / "workspace-file"
+    parent.write_text("not a directory")
+    with pytest.raises(SupervisionValidationError, match="workspace"):
+        validate_plan(
+            SupervisionPlan(
+                (RunSpec("file-parent", ("echo",), parent / "child"),),
+                max_concurrency=1,
+            )
+        )
+
+
 def test_run_supervised_bounds_concurrency_and_isolates_outputs(tmp_path):
     plan = _plan(tmp_path)
     output_root = tmp_path / "results"
@@ -95,6 +114,32 @@ def test_run_supervised_bounds_concurrency_and_isolates_outputs(tmp_path):
     )
     assert peak <= plan.max_concurrency
     assert all(run.workspace != output_root for run in plan.runs)
+
+
+def test_run_supervised_rejects_preexisting_output_log_symlink(tmp_path):
+    output_root = tmp_path / "results"
+    (output_root / "runs").mkdir(parents=True)
+    target = tmp_path / "outside.log"
+    target.write_text("must remain unchanged")
+    (output_root / "runs" / "run-0.log").symlink_to(target)
+    plan = _plan(tmp_path, count=1, concurrency=1)
+
+    with pytest.raises(SupervisionValidationError, match="output log"):
+        run_supervised(plan, output_root)
+    assert target.read_text() == "must remain unchanged"
+
+
+def test_resume_rejects_inconsistent_succeeded_row(tmp_path):
+    plan = _plan(tmp_path, count=1, concurrency=1)
+    output_root = tmp_path / "results"
+    run_supervised(plan, output_root)
+    manifest_path = output_root / "supervision-result.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["runs"][0]["exit_code"] = 7
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SupervisionValidationError, match="succeeded"):
+        run_supervised(plan, output_root, resume=True)
 
 
 def test_failed_run_does_not_cancel_healthy_siblings(tmp_path):

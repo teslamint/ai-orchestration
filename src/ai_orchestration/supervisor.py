@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -30,9 +30,16 @@ class RunSpec:
     run_id: str
     command: tuple[str, ...]
     workspace: Path
+    _command_was_scalar: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "command", tuple(self.command))
+        scalar = isinstance(self.command, (str, bytes))
+        object.__setattr__(self, "_command_was_scalar", scalar)
+        object.__setattr__(
+            self,
+            "command",
+            (self.command,) if scalar else tuple(self.command),
+        )
         object.__setattr__(self, "workspace", Path(self.workspace))
 
 
@@ -178,9 +185,13 @@ def validate_plan(plan: SupervisionPlan) -> None:
         if run.run_id in identities:
             raise SupervisionValidationError("run_id values must be unique")
         identities.add(run.run_id)
-        if not run.command or any(
-            not isinstance(part, str) or not part or "\0" in part
-            for part in run.command
+        if (
+            run._command_was_scalar
+            or not run.command
+            or any(
+                not isinstance(part, str) or not part or "\0" in part
+                for part in run.command
+            )
         ):
             raise SupervisionValidationError(
                 f"command for {run.run_id} must contain non-empty strings"
@@ -198,7 +209,7 @@ def validate_plan(plan: SupervisionPlan) -> None:
             raise SupervisionValidationError(
                 f"workspace for {run.run_id} must be a directory"
             )
-        _reject_symlink_components(workspace)
+        _reject_symlink_components(workspace, label="workspace")
         normalized = workspace.resolve(strict=False)
         if normalized in workspaces:
             raise SupervisionValidationError("workspace values must be unique")
@@ -246,6 +257,18 @@ def run_supervised(
     manifest_path = root / "supervision-result.json"
     if manifest_path.exists() and manifest_path.is_symlink():
         raise SupervisionValidationError("result manifest must not be a symlink")
+    if manifest_path.exists() and not manifest_path.is_file():
+        raise SupervisionValidationError("result manifest path must be a file")
+    for run in plan.runs:
+        output_path = _output_path(root, run.run_id)
+        if output_path.is_symlink():
+            raise SupervisionValidationError(
+                f"output log for {run.run_id} must not be a symlink"
+            )
+        if output_path.exists() and not output_path.is_file():
+            raise SupervisionValidationError(
+                f"output log for {run.run_id} must be a file"
+            )
     results = {run.run_id: _not_started_result(run, root) for run in plan.runs}
     if resume and manifest_path.exists():
         for result in _load_resume_results(manifest_path, plan, root):
@@ -335,6 +358,14 @@ def _load_resume_results(
                 "resume manifest paths do not match the plan"
             )
         if result.status == "succeeded":
+            if (
+                result.attempt_count < 1
+                or result.exit_code != 0
+                or result.error is not None
+            ):
+                raise SupervisionValidationError(
+                    f"resume manifest succeeded row for {result.run_id} is inconsistent"
+                )
             output_path = Path(result.output_path)
             if (
                 not output_path.exists()
@@ -515,13 +546,17 @@ def _write_manifest(path: Path, payload: dict[str, object]) -> None:
         raise
 
 
-def _reject_symlink_components(path: Path) -> None:
+def _reject_symlink_components(path: Path, *, label: str = "path") -> None:
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
         if current.is_symlink():
             raise SupervisionValidationError(
-                f"symlinked path component is not allowed: {current}"
+                f"symlinked {label} component is not allowed: {current}"
+            )
+        if current.exists() and not current.is_dir():
+            raise SupervisionValidationError(
+                f"{label} path component must be a directory: {current}"
             )
 
 
