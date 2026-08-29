@@ -1,0 +1,15 @@
+{
+  "schema": "eval-contract/v1",
+  "source_commit": "59dcff696ba2aa3bfa24a46ed77baee5c41c2ac6",
+  "source_paths": {
+    "skills/release-loop/references/progress-schema.md": "e033ce43217d06874c43cded54850293b643ee85dc507037ef2be11d15ba7037",
+    "skills/planning/schemas/plan-schema.md": "9ca9f437dd3b98cf85d5b16a8edb764f0cccd32dac9d5982a3b1b535ad42968d",
+    "schemas/headless-contract.md": "4a680c1b3ddebece021062698f85acbf336d8b81c974c7befec9dfae71deab3b",
+    "skills/planning/scripts/validate-plan-frontmatter.py": "4f0c9fbbcab7af4ef92c82a65d34fc747437eb73b5fe2734194b7859884756f6"
+  },
+  "supported_literals": {
+    "plan_schema": ["plan/v1"],
+    "headless_contract": ["v1"],
+    "progress_schema": ["release-loop/v1"]
+  }
+}
