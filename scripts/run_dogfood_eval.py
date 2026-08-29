@@ -54,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
         "--build-manifest",
         "--call-events",
         "--expected-attempts",
+        "--producer-manifest",
         "--output",
     )
 
@@ -350,15 +351,21 @@ def _local(args: argparse.Namespace) -> dict[str, Any]:
     provider_config_sha256 = hashlib.sha256(b"{}").hexdigest()
     elapsed_ms = 0
     trial_id = contract.tasks[0].trial_ids[0]
-    candidate_args = (args.call_events, args.expected_attempts)
+    candidate_args = (
+        args.call_events,
+        args.expected_attempts,
+        args.producer_manifest,
+    )
     if any(candidate_args):
         if not all(candidate_args):
             raise ContractError(
                 "local candidate observation requires --call-events, "
-                "and --expected-attempts"
+                "--expected-attempts, and --producer-manifest"
             )
         observation = _candidate_observation(
-            Path(args.call_events), Path(args.expected_attempts)
+            Path(args.call_events),
+            Path(args.expected_attempts),
+            Path(args.producer_manifest),
         )
         stability_checks.update(
             {"call_events_valid": True, "direct_vendor_observed": True}
@@ -391,7 +398,12 @@ def _local(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
-def _candidate_observation(path: Path, expected_path: Path) -> dict[str, Any]:
+def _candidate_observation(
+    path: Path, expected_path: Path, producer_manifest_path: Path
+) -> dict[str, Any]:
+    producer = _producer_manifest(
+        producer_manifest_path, event_path=path, expected_run_id=None
+    )
     event_bytes = _input_snapshot(path, "call-event")
     try:
         lines = event_bytes.decode("utf-8").splitlines()
@@ -436,6 +448,9 @@ def _candidate_observation(path: Path, expected_path: Path) -> dict[str, Any]:
         uuid.UUID(expected_manifest["run_id"])
     except ValueError as exc:
         raise ContractError("expected-attempt run_id must be a UUID") from exc
+    if producer["run_id"] != expected_manifest["run_id"]:
+        raise ContractError("producer manifest run_id does not match expected attempts")
+    _verify_producer_state(producer, expected_manifest["run_id"])
     expected = []
     for raw in expected_manifest["attempts"]:
         if not isinstance(raw, dict) or set(raw) != {
@@ -528,7 +543,67 @@ def _candidate_observation(path: Path, expected_path: Path) -> dict[str, Any]:
             json.dumps(provider_config, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
         "usage": usage,
+        "producer_manifest_sha256": _digest(producer_manifest_path),
+        "state_sha256": producer["state_sha256"],
     }
+
+
+def _producer_manifest(
+    path: Path, *, event_path: Path, expected_run_id: str | None
+) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ContractError("producer manifest is unreadable") from exc
+    if path.is_symlink() or metadata.st_mode & 0o777 != 0o600:
+        raise ContractError("producer manifest must be a non-symlink mode 0600 file")
+    payload = _object(path)
+    if set(payload) != {
+        "version",
+        "run_id",
+        "state_path",
+        "state_sha256",
+        "call_events_path",
+        "call_events_sha256",
+    }:
+        raise ContractError("producer manifest has an unexpected shape")
+    if (
+        payload["version"] != "producer-manifest/v1"
+        or not isinstance(payload["run_id"], str)
+        or not _is_hex(payload["state_sha256"], 64)
+        or not _is_hex(payload["call_events_sha256"], 64)
+        or not isinstance(payload["state_path"], str)
+        or not isinstance(payload["call_events_path"], str)
+    ):
+        raise ContractError("producer manifest is incomplete")
+    try:
+        uuid.UUID(payload["run_id"])
+    except ValueError as exc:
+        raise ContractError("producer manifest run_id must be a UUID") from exc
+    state_path = Path(payload["state_path"])
+    declared_events = Path(payload["call_events_path"])
+    if (
+        not state_path.is_absolute()
+        or not declared_events.is_absolute()
+        or declared_events != event_path.absolute()
+        or state_path.parent != declared_events.parent
+    ):
+        raise ContractError("producer manifest paths do not match candidate inputs")
+    _reject_symlink_components(state_path)
+    _reject_symlink_components(declared_events)
+    if _digest(state_path) != payload["state_sha256"]:
+        raise ContractError("producer state digest does not match")
+    if _digest(declared_events) != payload["call_events_sha256"]:
+        raise ContractError("producer call-event digest does not match")
+    if expected_run_id is not None and payload["run_id"] != expected_run_id:
+        raise ContractError("producer manifest run_id does not match")
+    return payload
+
+
+def _verify_producer_state(producer: dict[str, Any], run_id: str) -> None:
+    state = _object(Path(producer["state_path"]))
+    if state.get("run_id") != run_id:
+        raise ContractError("producer state run_id does not match")
 
 
 def _input_snapshot(path: Path, label: str) -> bytes:

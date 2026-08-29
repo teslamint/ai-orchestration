@@ -8,10 +8,12 @@ binary, or one reserved direct-vendor literal.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
 import sys
+import tempfile
 import time
 from contextvars import ContextVar
 from datetime import datetime
@@ -370,6 +372,35 @@ def _resolve_debug_log_path(debug: bool, debug_log: str) -> Optional[Path]:
             f"{log_path.stem}-{timestamp}{log_path.suffix}"
         ).resolve()
     return (log_path / f"orchestrator_debug-{timestamp}.log").resolve()
+
+
+def _write_producer_manifest(
+    state_path: Path, call_events_path: Path, run_id: str
+) -> None:
+    """Publish hashes binding a completed run to its content-free observations."""
+    state_bytes = state_path.read_bytes()
+    call_events_bytes = call_events_path.read_bytes()
+    manifest = {
+        "version": "producer-manifest/v1",
+        "run_id": run_id,
+        "state_path": str(state_path.absolute()),
+        "state_sha256": hashlib.sha256(state_bytes).hexdigest(),
+        "call_events_path": str(call_events_path.absolute()),
+        "call_events_sha256": hashlib.sha256(call_events_bytes).hexdigest(),
+    }
+    target = state_path.with_name("producer-manifest.json")
+    fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 # --- Stage runners: thin wrappers over routing + prompts --------------------
@@ -1211,6 +1242,12 @@ def _run(
                 ),
             ),
         )
+
+    _write_producer_manifest(
+        state_path,
+        state_path.with_name("call_events.jsonl"),
+        run_state.run_id,
+    )
 
 
 if __name__ == "__main__":

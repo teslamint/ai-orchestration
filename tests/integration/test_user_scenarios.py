@@ -252,6 +252,14 @@ def test_direct_vendor_stage_runs_full_cli_path_and_records_candidate_event(
         ),
         encoding="utf-8",
     )
+    state_path = tmp_path / "candidate_direct" / ".ai_orchestration" / "run_state.json"
+    producer_manifest = (
+        tmp_path / "candidate_direct" / ".ai_orchestration" / "producer-manifest.json"
+    )
+    generated_producer = json.loads(producer_manifest.read_text(encoding="utf-8"))
+    assert generated_producer["version"] == "producer-manifest/v1"
+    assert generated_producer["run_id"] == events[0].run_id
+    assert generated_producer["state_path"] == str(state_path)
     provider_digest = hashlib.sha256(
         json.dumps(provider_config, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -274,6 +282,8 @@ def test_direct_vendor_stage_runs_full_cli_path_and_records_candidate_event(
             ),
             "--expected-attempts",
             str(expected_path),
+            "--producer-manifest",
+            str(producer_manifest),
             "--output",
             str(fragment_path),
         ],

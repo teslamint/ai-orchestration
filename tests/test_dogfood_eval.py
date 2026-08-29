@@ -537,6 +537,23 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
         ),
         encoding="utf-8",
     )
+    state = tmp_path / "run_state.json"
+    state.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    producer_manifest = tmp_path / "producer-manifest.json"
+    producer_manifest.write_text(
+        json.dumps(
+            {
+                "version": "producer-manifest/v1",
+                "run_id": run_id,
+                "state_path": str(state),
+                "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+                "call_events_path": str(events),
+                "call_events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    producer_manifest.chmod(0o600)
     output = tmp_path / "candidate-fragment.json"
     command = [
         sys.executable,
@@ -550,6 +567,8 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
         str(events),
         "--expected-attempts",
         str(expected),
+        "--producer-manifest",
+        str(producer_manifest),
         "--output",
         str(output),
     ]
@@ -569,7 +588,11 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
         "call_events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
         "direct_vendor_ids": ["anthropic_api", "gemini_api", "openai_api"],
         "expected_attempts_sha256": hashlib.sha256(expected.read_bytes()).hexdigest(),
+        "producer_manifest_sha256": hashlib.sha256(
+            producer_manifest.read_bytes()
+        ).hexdigest(),
         "run_id": run_id,
+        "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
     }
     assert (
         fragment["provider_config_sha256"]
@@ -580,6 +603,13 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
     assert fragment["elapsed_ms"] == 8
     assert fragment["usage"] == {"input_tokens": 33, "output_tokens": 15}
     assert fragment["artifact_checks"]["sanitized"] is True
+
+    state.write_text(json.dumps({"run_id": run_id, "tampered": True}), encoding="utf-8")
+    command[-1] = str(tmp_path / "tampered-state.json")
+    tampered = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert tampered.returncode == 1
+    assert "producer state digest" in tampered.stderr
+    state.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
 
     expected_payload = json.loads(expected.read_text(encoding="utf-8"))
     for field, invalid_value in (
@@ -604,6 +634,12 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
         "".join(json.dumps(event) + "\n" for event in reserved_proxy_rows),
         encoding="utf-8",
     )
+    producer_payload = json.loads(producer_manifest.read_text(encoding="utf-8"))
+    producer_payload["call_events_sha256"] = hashlib.sha256(
+        events.read_bytes()
+    ).hexdigest()
+    producer_manifest.write_text(json.dumps(producer_payload), encoding="utf-8")
+    producer_manifest.chmod(0o600)
     expected_payload["attempts"][-1]["provider_id"] = "openai_api"
     expected_payload["provider_config"]["executor"] = "openai_api"
     expected.write_text(json.dumps(expected_payload), encoding="utf-8")
@@ -680,7 +716,7 @@ def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
     result = subprocess.run(command, text=True, capture_output=True, env=env)
 
     assert result.returncode == 1
-    assert "four unique calls" in result.stderr
+    assert "producer-manifest" in result.stderr
     assert not output.exists()
 
 
