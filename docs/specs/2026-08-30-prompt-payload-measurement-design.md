@@ -2,7 +2,7 @@
 schema: spec/v1
 title: Measure Prompt Payloads Before Message Migration
 type: feat
-status: draft
+status: approved
 date: 2026-08-30
 ---
 
