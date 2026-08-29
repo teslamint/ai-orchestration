@@ -2,11 +2,12 @@
 schema: plan/v1
 title: Supervise Independent Orchestration Runs Concurrently
 type: feat
-status: draft
+status: approved
 date: 2026-08-30
 execution: code
 origin: docs/specs/2026-08-30-concurrent-supervision-design.md
 deepened: true
+body_seal: fe438dbfbd4402c2231cadb3826c7e96f49c0c74c088b5a4a10219e3fa91aad0
 ---
 
 # Goal
