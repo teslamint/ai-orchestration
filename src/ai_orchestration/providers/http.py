@@ -88,6 +88,7 @@ class HttpProvider:
         self.model = model
         self.base_url = base_url
         self.timeout = timeout
+        self.max_retries = max_retries
         self.usage_sink = usage_sink
         self.authorization_gate = authorization_gate or NoOpAuthorizationGate()
         http_client = (
@@ -104,13 +105,23 @@ class HttpProvider:
     def is_available(self) -> bool:
         return True
 
+    def _authorize(self, request: dict[str, object]) -> None:
+        self.authorization_gate.authorize(
+            OutboundPayload.for_http_json(
+                request,
+                destination=self.base_url,
+                timeout_seconds=float(self.timeout),
+                retry_limit=self.max_retries,
+            )
+        )
+
     def complete(self, prompt: str, *, system: Optional[str] = None) -> str:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         request = {"model": self.model, "messages": messages}
-        self.authorization_gate.authorize(OutboundPayload.for_http_json(request))
+        self._authorize(request)
         try:
             response = self._client.chat.completions.create(**request)
         except (APIConnectionError, httpx.ConnectError, httpx.TimeoutException) as exc:
@@ -151,7 +162,7 @@ class HttpProvider:
                 },
             },
         }
-        self.authorization_gate.authorize(OutboundPayload.for_http_json(request))
+        self._authorize(request)
         try:
             response = self._client.chat.completions.create(**request)
         except (APIConnectionError, httpx.ConnectError, httpx.TimeoutException) as exc:
@@ -163,9 +174,7 @@ class HttpProvider:
                 # Some OpenAI-compatible proxies reject structured-output
                 # requests while accepting the same prompt as plain text.
                 fallback_request = {"model": self.model, "messages": messages}
-                self.authorization_gate.authorize(
-                    OutboundPayload.for_http_json(fallback_request)
-                )
+                self._authorize(fallback_request)
                 response = self._client.chat.completions.create(**fallback_request)
             except (
                 APIConnectionError,

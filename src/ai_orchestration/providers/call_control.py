@@ -26,10 +26,18 @@ class OutboundPayload:
     transport: TransportKind
     _rendered: bytes
     argv: tuple[str, ...] | None = None
+    destination: str | None = None
+    timeout_seconds: float | None = None
+    retry_limit: int | None = None
 
     @classmethod
     def for_http_json(
-        cls, payload: bytes | bytearray | memoryview | Mapping[str, Any]
+        cls,
+        payload: bytes | bytearray | memoryview | Mapping[str, Any],
+        *,
+        destination: str | None = None,
+        timeout_seconds: float | None = None,
+        retry_limit: int | None = None,
     ) -> OutboundPayload:
         if isinstance(payload, (bytes, bytearray, memoryview)):
             rendered = bytes(payload)
@@ -49,7 +57,13 @@ class OutboundPayload:
                 raise ValueError("HTTP payload must be JSON serializable") from exc
         else:
             raise TypeError("HTTP payload must be JSON bytes or a mapping")
-        return cls(transport="http_json", _rendered=rendered)
+        return cls(
+            transport="http_json",
+            _rendered=rendered,
+            destination=destination,
+            timeout_seconds=timeout_seconds,
+            retry_limit=retry_limit,
+        )
 
     @classmethod
     def for_cli_argv(cls, argv: Sequence[str]) -> OutboundPayload:
@@ -165,6 +179,9 @@ class SocketAuthorizationGate:
             "transport": payload.transport,
             "payload_path": str(self.payload_path.absolute()),
             "payload_sha256": payload.sha256,
+            "destination": payload.destination,
+            "timeout_seconds": payload.timeout_seconds,
+            "retry_limit": payload.retry_limit,
         }
         encoded = (
             json.dumps(packet, sort_keys=True, separators=(",", ":")).encode("utf-8")

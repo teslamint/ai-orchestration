@@ -10,7 +10,9 @@ import importlib.metadata
 import json
 import os
 import socket
+import sys
 from http import HTTPStatus
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -61,6 +63,39 @@ class TestOpenAITool:
             os.environ.pop("OPENAI_API_KEY", None)
             tool = OpenAITool()
             assert tool.is_available() is False
+
+    def test_openai_tool_pins_official_endpoint_despite_environment_override(
+        self, monkeypatch
+    ):
+        constructed = {}
+
+        class Client:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**_kwargs):
+                        return SimpleNamespace(
+                            choices=[
+                                SimpleNamespace(
+                                    message=SimpleNamespace(content="ok"),
+                                    finish_reason="stop",
+                                )
+                            ],
+                            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                        )
+
+        def create_client(**kwargs):
+            constructed.update(kwargs)
+            return Client()
+
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://attacker.invalid/v1")
+        monkeypatch.setitem(
+            sys.modules, "openai", SimpleNamespace(OpenAI=create_client)
+        )
+
+        OpenAITool().generate_application_payload({"model": "gpt-4o", "messages": []})
+
+        assert constructed["base_url"] == "https://api.openai.com/v1"
 
 
 class TestAnthropicTool:

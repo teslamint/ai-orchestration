@@ -109,10 +109,38 @@ def test_socket_gate_sends_only_content_free_packet_and_continues(tmp_path):
         "transport",
         "payload_path",
         "payload_sha256",
+        "destination",
+        "timeout_seconds",
+        "retry_limit",
     }
     assert "exact secret bytes" not in json.dumps(observed)
     assert observed["payload_sha256"] == payload.sha256
     assert not payload_path.exists()
+
+
+def test_socket_gate_binds_http_destination_before_transport(tmp_path):
+    socket_path = _socket_path(tmp_path)
+    payload_path = tmp_path / "payload.json"
+    observed, thread = _authorization_server(socket_path, _approval)
+
+    SocketAuthorizationGate(
+        socket_path=socket_path,
+        payload_path=payload_path,
+        timeout=1.0,
+    ).authorize(
+        OutboundPayload.for_http_json(
+            {"model": "gpt-test", "messages": []},
+            destination="https://proxy.example/v1",
+            timeout_seconds=12.0,
+            retry_limit=2,
+        )
+    )
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert observed["destination"] == "https://proxy.example/v1"
+    assert observed["timeout_seconds"] == 12.0
+    assert observed["retry_limit"] == 2
 
 
 def test_socket_gate_payload_file_is_private_and_exact_while_waiting(tmp_path):

@@ -47,6 +47,7 @@ class APIBasedTool(ABC):
     """Abstract base for API-based LLM tools."""
 
     model: str = ""
+    endpoint: str = ""
 
     @abstractmethod
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> APIResponse:
@@ -160,7 +161,10 @@ class LegacyProviderAdapter:
     def _generate(self, prompt: str, system: str | None) -> APIResponse:
         application_payload = self.tool.build_application_payload(prompt, system)
         self.authorization_gate.authorize(
-            OutboundPayload.for_http_json(application_payload)
+            OutboundPayload.for_http_json(
+                application_payload,
+                destination=self.tool.endpoint,
+            )
         )
         try:
             response = self.tool.generate_application_payload(application_payload)
@@ -229,6 +233,7 @@ class OpenAITool(APIBasedTool):
     """OpenAI API tool (gpt-4o)."""
 
     model = "gpt-4o"
+    endpoint = "https://api.openai.com/v1"
 
     def is_available(self) -> bool:
         return bool(os.environ.get("OPENAI_API_KEY"))
@@ -250,7 +255,7 @@ class OpenAITool(APIBasedTool):
     def generate_application_payload(self, payload: Mapping[str, Any]) -> APIResponse:
         from openai import OpenAI
 
-        client = OpenAI()
+        client = OpenAI(base_url=self.endpoint)
         response = client.chat.completions.create(**dict(payload))
         return APIResponse(
             content=response.choices[0].message.content or "",
@@ -268,7 +273,7 @@ class OpenAITool(APIBasedTool):
     ) -> Iterator[str]:
         from openai import OpenAI
 
-        client = OpenAI()
+        client = OpenAI(base_url=self.endpoint)
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -285,6 +290,7 @@ class AnthropicTool(APIBasedTool):
     """Anthropic API tool (Claude Sonnet)."""
 
     model = "claude-sonnet-4-20250514"
+    endpoint = "https://api.anthropic.com"
 
     def is_available(self) -> bool:
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -342,6 +348,7 @@ class GoogleAITool(APIBasedTool):
     """Google AI API tool (Gemini)."""
 
     model = "gemini-2.0-flash"
+    endpoint = "https://generativelanguage.googleapis.com"
 
     def is_available(self) -> bool:
         return bool(os.environ.get("GOOGLE_AI_API_KEY"))
