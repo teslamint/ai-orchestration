@@ -121,6 +121,7 @@ def _manifest(path: Path) -> dict[str, Any]:
     ):
         raise ContractError(f"build manifest is incomplete: {path}")
     _verify_commit_object(commit)
+    _verify_current_commit(commit)
     return payload
 
 
@@ -171,6 +172,23 @@ def _verify_commit_object(commit: str) -> None:
         raise ContractError(f"manifest commit does not exist: {commit}") from exc
     if result.stdout.strip() != "commit":
         raise ContractError("manifest commit must identify a commit object")
+
+
+def _verify_current_commit(commit: str) -> None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ContractError(
+            "could not resolve current HEAD for build manifest"
+        ) from exc
+    if result.stdout.strip() != commit:
+        raise ContractError("build manifest commit does not match current HEAD")
 
 
 def _baseline_manifest(path: Path) -> dict[str, Any]:
@@ -483,7 +501,10 @@ def _candidate_observation(
         raise ContractError("expected-attempt run_id must be a UUID") from exc
     if producer["run_id"] != expected_manifest["run_id"]:
         raise ContractError("producer manifest run_id does not match expected attempts")
-    _verify_producer_state(producer, expected_manifest["run_id"])
+    state_bytes = _input_snapshot(Path(producer["state_path"]), "producer state")
+    _verify_producer_state(
+        producer, expected_manifest["run_id"], state_bytes=state_bytes
+    )
     events = [
         event
         for event in all_events
@@ -652,8 +673,19 @@ def _producer_manifest(
     return payload
 
 
-def _verify_producer_state(producer: dict[str, Any], run_id: str) -> None:
-    state = _object(Path(producer["state_path"]))
+def _verify_producer_state(
+    producer: dict[str, Any], run_id: str, *, state_bytes: bytes | None = None
+) -> None:
+    if state_bytes is None:
+        state_bytes = _input_snapshot(Path(producer["state_path"]), "producer state")
+    if hashlib.sha256(state_bytes).hexdigest() != producer["state_sha256"]:
+        raise ContractError("producer state digest does not match")
+    try:
+        state = json.loads(state_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("producer state is invalid JSON") from exc
+    if not isinstance(state, dict):
+        raise ContractError("producer state must be an object")
     if state.get("run_id") != run_id:
         raise ContractError("producer state run_id does not match")
 

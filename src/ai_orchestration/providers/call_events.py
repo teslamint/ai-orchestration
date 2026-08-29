@@ -279,6 +279,7 @@ class CallRecorder:
         self.task_id = task_id
         self.executor_step_id = executor_step_id
         self._lock_path = self.path.with_name(f".{self.path.name}.lock")
+        self._validated_offset: int | None = None
         CallEvent(
             run_id=run_id,
             task_id=task_id,
@@ -349,9 +350,16 @@ class CallRecorder:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             event_fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
             try:
-                existing = _read_fd(event_fd)
-                complete = self._quarantine_partial_tail(event_fd, existing)
+                file_size = os.fstat(event_fd).st_size
+                start = self._validated_offset
+                if start is None or start > file_size:
+                    start = 0
+                existing = _read_fd(event_fd, start=start)
+                complete = self._quarantine_partial_tail(
+                    event_fd, existing, base_offset=start
+                )
                 _decode_rows(complete, self.path)
+                self._validated_offset = start + len(complete)
                 payload = (
                     json.dumps(
                         event.to_dict(), ensure_ascii=False, separators=(",", ":")
@@ -360,13 +368,16 @@ class CallRecorder:
                 )
                 self._write_all(event_fd, payload)
                 os.fsync(event_fd)
+                self._validated_offset += len(payload)
             finally:
                 os.close(event_fd)
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
 
-    def _quarantine_partial_tail(self, event_fd: int, content: bytes) -> bytes:
+    def _quarantine_partial_tail(
+        self, event_fd: int, content: bytes, *, base_offset: int
+    ) -> bytes:
         if not content or content.endswith(b"\n"):
             return content
         newline = content.rfind(b"\n")
@@ -383,7 +394,7 @@ class CallRecorder:
             os.fsync(quarantine_fd)
         finally:
             os.close(quarantine_fd)
-        os.ftruncate(event_fd, complete_length)
+        os.ftruncate(event_fd, base_offset + complete_length)
         os.fsync(event_fd)
         return content[:complete_length]
 
@@ -396,10 +407,12 @@ class CallRecorder:
             remaining = remaining[written:]
 
 
-def _read_fd(fd: int) -> bytes:
+def _read_fd(fd: int, *, start: int = 0) -> bytes:
     size = os.fstat(fd).st_size
+    if start < 0 or start > size:
+        raise OSError("event read offset is outside the file")
     chunks: list[bytes] = []
-    offset = 0
+    offset = start
     while offset < size:
         chunk = os.pread(fd, min(64 * 1024, size - offset), offset)
         if not chunk:

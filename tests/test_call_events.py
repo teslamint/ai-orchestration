@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import ai_orchestration.providers.call_events as call_events_module
 from ai_orchestration.config import StageConfig
 from ai_orchestration.providers.base import TransportError
 from ai_orchestration.providers.call_events import (
@@ -204,6 +205,35 @@ def test_process_safe_append_and_partial_tail_recovery(tmp_path):
     quarantine = list(tmp_path.glob("call_events.jsonl.partial.*"))
     assert len(quarantine) == 1
     assert quarantine[0].read_bytes() == partial
+
+
+def test_repeated_append_validates_only_new_event_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "call_events.jsonl"
+    recorder = CallRecorder(path, run_id=RUN_ID, task_id="C1-E")
+    observed = []
+    original_read_fd = call_events_module._read_fd
+
+    def read_from_offset(fd, start=0):
+        content = original_read_fd(fd, start=start)
+        observed.append((start, len(content)))
+        return content
+
+    monkeypatch.setattr(call_events_module, "_read_fd", read_from_offset)
+    for attempt_number in (1, 2):
+        attempt = recorder.start_attempt(
+            stage="planner",
+            provider_kind="proxy_model",
+            provider_id=f"model-{attempt_number}",
+            attempt=attempt_number,
+            prompt="repeated append",
+        )
+        attempt.finish(outcome="success")
+
+    assert len(observed) == 2
+    assert observed[0][0] == 0
+    assert observed[0][1] == 0
+    assert observed[1][0] > 0
+    assert observed[1][1] <= observed[1][0]
 
 
 def test_append_failure_warns_and_next_attempt_recovers_partial_tail(

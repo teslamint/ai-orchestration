@@ -530,6 +530,38 @@ def test_cli_local_rejects_unknown_build_commit(tmp_path):
     assert result.returncode == 1
     assert "commit" in result.stderr
 
+    parent_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD^"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": "build-manifest/v1",
+                "commit": parent_commit,
+                "dirty": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_dogfood_eval.py",
+            "local",
+            "--contract",
+            str(CONTRACT),
+            "--build-manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "parent-result.json"),
+        ],
+        text=True,
+        capture_output=True,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+    )
+    assert result.returncode == 1
+    assert "HEAD" in result.stderr
+
 
 def test_producer_manifest_rejects_changed_event_after_snapshot(tmp_path):
     module = _load_eval_runner()
@@ -560,6 +592,23 @@ def test_producer_manifest_rejects_changed_event_after_snapshot(tmp_path):
             event_path=events,
             expected_run_id=run_id,
             event_bytes=b"snapshot taken before replacement",
+        )
+
+
+def test_producer_state_rejects_changed_snapshot(tmp_path):
+    module = _load_eval_runner()
+    run_id = "99756532-a866-4e91-8480-47adac64778e"
+    state = tmp_path / "run_state.json"
+    state.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+
+    with pytest.raises(module.ContractError, match="producer state digest"):
+        module._verify_producer_state(
+            {
+                "state_path": str(state),
+                "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+            },
+            run_id,
+            state_bytes=b'{"run_id":"changed"}',
         )
 
 
