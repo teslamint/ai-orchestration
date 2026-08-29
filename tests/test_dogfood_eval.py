@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -22,6 +23,15 @@ from ai_orchestration.evals.dogfood import (
 )
 
 CONTRACT = Path("evals/dogfood/v1")
+
+
+def _load_eval_runner():
+    path = Path(__file__).parents[1] / "scripts" / "run_dogfood_eval.py"
+    spec = importlib.util.spec_from_file_location("run_dogfood_eval_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_contract_fixes_tasks_trials_rubric_and_thresholds():
@@ -456,10 +466,11 @@ def test_cli_preflight_is_offline_and_live_commands_fail_closed(tmp_path):
 
 def test_cli_local_writes_private_output_and_rejects_symlinked_root(tmp_path):
     manifest = tmp_path / "manifest.json"
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
     manifest.write_text(
-        json.dumps(
-            {"version": "build-manifest/v1", "commit": "a" * 40, "dirty": False}
-        ),
+        json.dumps({"version": "build-manifest/v1", "commit": commit, "dirty": False}),
         encoding="utf-8",
     )
     output = tmp_path / "result.json"
@@ -492,12 +503,73 @@ def test_cli_local_writes_private_output_and_rejects_symlinked_root(tmp_path):
     assert "symlinked output root" in result.stderr
 
 
-def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
+def test_cli_local_rejects_unknown_build_commit(tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
-            {"version": "build-manifest/v1", "commit": "c" * 40, "dirty": False}
+            {"version": "build-manifest/v1", "commit": "a" * 40, "dirty": False}
         ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_dogfood_eval.py",
+            "local",
+            "--contract",
+            str(CONTRACT),
+            "--build-manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "result.json"),
+        ],
+        text=True,
+        capture_output=True,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+    )
+    assert result.returncode == 1
+    assert "commit" in result.stderr
+
+
+def test_producer_manifest_rejects_changed_event_after_snapshot(tmp_path):
+    module = _load_eval_runner()
+    run_id = "99756532-a866-4e91-8480-47adac64778e"
+    state = tmp_path / "run_state.json"
+    state.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    events = tmp_path / "call_events.jsonl"
+    events.write_bytes(b"current event bytes")
+    manifest = tmp_path / "producer-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": "producer-manifest/v1",
+                "run_id": run_id,
+                "state_path": str(state),
+                "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+                "call_events_path": str(events),
+                "call_events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest.chmod(0o600)
+
+    with pytest.raises(module.ContractError, match="call-event digest"):
+        module._producer_manifest(
+            manifest,
+            event_path=events,
+            expected_run_id=run_id,
+            event_bytes=b"snapshot taken before replacement",
+        )
+
+
+def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    manifest.write_text(
+        json.dumps({"version": "build-manifest/v1", "commit": commit, "dirty": False}),
         encoding="utf-8",
     )
     run_id = "99756532-a866-4e91-8480-47adac64778e"
@@ -529,8 +601,13 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
         for stage, provider_kind, provider_id in routes
     ]
     events = tmp_path / "events.jsonl"
+    previous_run_id = "e5e4ef7d-23b1-4bcb-a7e2-c55cb2e7d6ef"
+    previous_event_rows = [{**event, "run_id": previous_run_id} for event in event_rows]
     events.write_text(
-        "".join(json.dumps(event) + "\n" for event in event_rows), encoding="utf-8"
+        "".join(
+            json.dumps(event) + "\n" for event in [*previous_event_rows, *event_rows]
+        ),
+        encoding="utf-8",
     )
     provider_config = {
         "brainstormer": "gemini_api",
@@ -683,10 +760,11 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
 
 def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
     manifest = tmp_path / "manifest.json"
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
     manifest.write_text(
-        json.dumps(
-            {"version": "build-manifest/v1", "commit": "d" * 40, "dirty": False}
-        ),
+        json.dumps({"version": "build-manifest/v1", "commit": commit, "dirty": False}),
         encoding="utf-8",
     )
     events = tmp_path / "events.jsonl"

@@ -120,6 +120,7 @@ def _manifest(path: Path) -> dict[str, Any]:
         or payload["dirty"] is not False
     ):
         raise ContractError(f"build manifest is incomplete: {path}")
+    _verify_commit_object(commit)
     return payload
 
 
@@ -155,6 +156,21 @@ def _verify_git_identity(commit: str, tree: str) -> None:
         raise ContractError(f"manifest commit does not exist: {commit}") from exc
     if result.stdout.strip() != tree:
         raise ContractError("manifest tree does not match commit")
+
+
+def _verify_commit_object(commit: str) -> None:
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-t", commit],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ContractError(f"manifest commit does not exist: {commit}") from exc
+    if result.stdout.strip() != "commit":
+        raise ContractError("manifest commit must identify a commit object")
 
 
 def _baseline_manifest(path: Path) -> dict[str, Any]:
@@ -415,15 +431,18 @@ def _local(args: argparse.Namespace) -> dict[str, Any]:
 def _candidate_observation(
     path: Path, expected_path: Path, producer_manifest_path: Path
 ) -> dict[str, Any]:
-    producer = _producer_manifest(
-        producer_manifest_path, event_path=path, expected_run_id=None
-    )
     event_bytes = _input_snapshot(path, "call-event")
+    producer = _producer_manifest(
+        producer_manifest_path,
+        event_path=path,
+        expected_run_id=None,
+        event_bytes=event_bytes,
+    )
     try:
         lines = event_bytes.decode("utf-8").splitlines()
     except UnicodeDecodeError as exc:
         raise ContractError("call-event file must contain UTF-8") from exc
-    events: list[dict[str, Any]] = []
+    all_events: list[dict[str, Any]] = []
     for ordinal, line in enumerate(lines, 1):
         try:
             event = json.loads(line)
@@ -431,7 +450,7 @@ def _candidate_observation(
             raise ContractError(f"malformed call event at line {ordinal}") from exc
         if not isinstance(event, dict):
             raise ContractError(f"call event at line {ordinal} must be an object")
-        events.append(event)
+        all_events.append(event)
     expected_bytes = _input_snapshot(expected_path, "expected-attempt")
     try:
         expected_manifest = json.loads(expected_bytes)
@@ -465,6 +484,11 @@ def _candidate_observation(
     if producer["run_id"] != expected_manifest["run_id"]:
         raise ContractError("producer manifest run_id does not match expected attempts")
     _verify_producer_state(producer, expected_manifest["run_id"])
+    events = [
+        event
+        for event in all_events
+        if event.get("run_id") == expected_manifest["run_id"]
+    ]
     expected = []
     for raw in expected_manifest["attempts"]:
         if not isinstance(raw, dict) or set(raw) != {
@@ -492,9 +516,14 @@ def _candidate_observation(
         )
     if len(expected) != 4 or len(set(expected)) != 4:
         raise ContractError("expected-attempt manifest requires four unique calls")
+    current_event_bytes = b"".join(
+        json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+        for event in events
+    )
     with tempfile.TemporaryDirectory(prefix="dogfood-events-") as temporary:
         snapshot_path = Path(temporary) / "call_events.jsonl"
-        snapshot_path.write_bytes(event_bytes)
+        snapshot_path.write_bytes(current_event_bytes)
         validation = validate_call_events(snapshot_path, expected)
     if validation.event_count != 4:
         raise ContractError("candidate routing matrix must contain exactly four calls")
@@ -563,7 +592,11 @@ def _candidate_observation(
 
 
 def _producer_manifest(
-    path: Path, *, event_path: Path, expected_run_id: str | None
+    path: Path,
+    *,
+    event_path: Path,
+    expected_run_id: str | None,
+    event_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     try:
         metadata = path.lstat()
@@ -607,7 +640,12 @@ def _producer_manifest(
     _reject_symlink_components(declared_events)
     if _digest(state_path) != payload["state_sha256"]:
         raise ContractError("producer state digest does not match")
-    if _digest(declared_events) != payload["call_events_sha256"]:
+    event_digest = (
+        _digest(declared_events)
+        if event_bytes is None
+        else hashlib.sha256(event_bytes).hexdigest()
+    )
+    if event_digest != payload["call_events_sha256"]:
         raise ContractError("producer call-event digest does not match")
     if expected_run_id is not None and payload["run_id"] != expected_run_id:
         raise ContractError("producer manifest run_id does not match")

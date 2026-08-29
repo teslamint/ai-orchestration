@@ -216,10 +216,11 @@ def test_direct_vendor_stage_runs_full_cli_path_and_records_candidate_event(
     ] == [(11, 5), (11, 5), (11, 5)]
 
     manifest = tmp_path / "candidate-build.json"
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
     manifest.write_text(
-        json.dumps(
-            {"version": "build-manifest/v1", "commit": "c" * 40, "dirty": False}
-        ),
+        json.dumps({"version": "build-manifest/v1", "commit": commit, "dirty": False}),
         encoding="utf-8",
     )
     provider_config = {

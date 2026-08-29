@@ -378,6 +378,40 @@ def test_fresh_v2_state_is_persisted_before_first_provider_call(tmp_path, monkey
     )
 
 
+def test_fresh_rerun_replaces_the_current_call_event_stream(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _install_reachable_catalog(monkeypatch)
+    arguments = [
+        "repeat candidate",
+        "--workspace",
+        str(tmp_path),
+        "--project-name",
+        "fresh_rerun_events",
+        "--auto-select",
+        "--auto-run",
+        "--auto-approve",
+        "--skip-review",
+    ]
+
+    first = runner.invoke(app, arguments)
+    second = runner.invoke(app, arguments)
+
+    assert first.exit_code == 0, first.stdout
+    assert second.exit_code == 0, second.stdout
+    state_path = (
+        tmp_path / "fresh_rerun_events" / ".ai_orchestration" / "run_state.json"
+    )
+    final = json.loads(state_path.read_text(encoding="utf-8"))
+    from ai_orchestration.providers.call_events import read_call_events
+
+    events = read_call_events(state_path.with_name("call_events.jsonl"))
+    assert len(events) == 8
+    assert len({event.run_id for event in events}) == 2
+    current_events = [event for event in events if event.run_id == final["run_id"]]
+    assert len(current_events) == 4
+    assert {event.run_id for event in current_events} == {final["run_id"]}
+
+
 # --- happy: --help lists every preserved option -----------------------------
 
 
