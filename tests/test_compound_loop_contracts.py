@@ -11,7 +11,12 @@ import pytest
 
 from ai_orchestration.compound_loop import (
     ContractError,
+    LedgerError,
+    ReleaseLoopState,
     load_contract_source,
+    load_ledger,
+    next_transition,
+    save_ledger,
     validate_plan,
 )
 
@@ -178,3 +183,96 @@ def test_validate_plan_rejects_missing_required_field(tmp_path):
 
     with pytest.raises(ContractError, match="required field"):
         validate_plan(plan)
+
+
+def test_next_transition_covers_phase_boundaries_and_user_gates():
+    transitions = (
+        (ReleaseLoopState("design", "in-progress"), "design-approved", "plan"),
+        (ReleaseLoopState("plan", "in-progress"), "plan-approved", "implement"),
+        (
+            ReleaseLoopState(
+                "implement",
+                "in-progress",
+                completed_stages=(
+                    "brainstormer",
+                    "brainstorming_reviewer",
+                    "planner",
+                    "executor",
+                    "code_reviewer",
+                    "fixer",
+                ),
+            ),
+            "implementation-complete",
+            "review",
+        ),
+        (ReleaseLoopState("review", "in-progress"), "review-clean", "ship"),
+        (ReleaseLoopState("ship", "waiting-user"), "ship-approved", "retro"),
+        (ReleaseLoopState("retro", "in-progress"), "retro-complete", "done"),
+    )
+
+    for state, event, expected_phase in transitions:
+        result = next_transition(state, event)
+        assert result.state.phase == expected_phase
+        assert result.state.phase_status in {"in-progress", "complete"}
+
+    waiting = next_transition(
+        ReleaseLoopState("ship", "in-progress"), "request-ship-approval"
+    )
+    assert waiting.state.phase_status == "waiting-user"
+
+
+def test_stage_markers_are_sequential_and_resume_to_the_next_stage():
+    state = ReleaseLoopState(
+        "implement",
+        "in-progress",
+        completed_stages=("brainstormer", "brainstorming_reviewer"),
+    )
+
+    started = next_transition(state, "stage-start:planner")
+    completed = next_transition(started.state, "stage-complete:planner")
+
+    assert completed.state.current_stage is None
+    assert completed.state.completed_stages[-1] == "planner"
+    assert completed.state.next_stage == "executor"
+
+    with pytest.raises(LedgerError, match="stage order"):
+        next_transition(completed.state, "stage-start:fixer")
+
+
+def test_ledger_round_trip_is_atomic_and_preserves_previous_bytes(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / ".release-loop" / "progress.md"
+    initial = ReleaseLoopState(
+        "implement",
+        "in-progress",
+        current_stage="planner",
+        completed_stages=("brainstormer", "brainstorming_reviewer"),
+    )
+    save_ledger(initial, path)
+    previous = path.read_bytes()
+
+    loaded = load_ledger(path)
+    assert loaded == initial
+
+    def fail_replace(source, target):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(
+        "ai_orchestration.compound_loop.ledger.os.replace", fail_replace
+    )
+    with pytest.raises(LedgerError, match="atomic"):
+        save_ledger(ReleaseLoopState("review", "in-progress"), path)
+    assert path.read_bytes() == previous
+
+
+def test_ledger_rejects_malformed_state_and_ship_retro_actions(tmp_path):
+    path = tmp_path / "progress.md"
+    path.write_text("---\nschema: unknown/v1\n---\n", encoding="utf-8")
+
+    with pytest.raises(LedgerError, match="schema"):
+        load_ledger(path)
+    with pytest.raises(LedgerError, match="external"):
+        next_transition(ReleaseLoopState("ship", "in-progress"), "merge")
+    with pytest.raises(LedgerError, match="external"):
+        next_transition(ReleaseLoopState("retro", "in-progress"), "archive")
