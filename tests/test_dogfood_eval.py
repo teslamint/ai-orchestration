@@ -276,11 +276,16 @@ def test_compare_builds_pairs_terminal_latency_and_reports_unmeasured_cost():
     assert report.candidate_usable == 2
 
 
-def _receipt(packet_sha256: str, session_id: str) -> dict[str, object]:
+def _receipt(
+    packet_sha256: str,
+    session_id: str,
+    *,
+    nonce: str = "93c9c8762cbc4ecca3673ebc43a43e58",
+) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     payload = {
         "version": "approval-receipt/v1",
-        "nonce": "93c9c8762cbc4ecca3673ebc43a43e58",
+        "nonce": nonce,
         "issuer": "user",
         "scope": "pilot",
         "packet_sha256": packet_sha256,
@@ -384,6 +389,38 @@ def test_receipt_requires_first_hand_approval_attestation(tmp_path, monkeypatch)
     monkeypatch.delenv("AI_ORCHESTRATION_USER_APPROVAL_KEY")
     with pytest.raises(ContractError, match="attestation key"):
         consume_receipt(receipt, "a" * 64, "session-1", expected_scope="pilot")
+
+
+def test_cancelled_trial_requires_fresh_receipt_before_retry(tmp_path):
+    packet = "a" * 64
+    first = tmp_path / "first-receipt.json"
+    first.write_text(json.dumps(_receipt(packet, "session-1")), encoding="utf-8")
+    first.chmod(0o600)
+
+    reservation = consume_receipt(first, packet, "session-1", expected_scope="pilot")
+
+    assert not first.exists()
+    assert reservation.reservation_path.exists()
+    assert not (tmp_path / "call_events.jsonl").exists()
+    with pytest.raises(ContractError, match="receipt does not exist"):
+        consume_receipt(first, packet, "session-1", expected_scope="pilot")
+
+    fresh = tmp_path / "fresh-receipt.json"
+    fresh.write_text(
+        json.dumps(
+            _receipt(
+                packet,
+                "session-1",
+                nonce="a3c9c8762cbc4ecca3673ebc43a43e58",
+            )
+        ),
+        encoding="utf-8",
+    )
+    fresh.chmod(0o600)
+    fresh_reservation = consume_receipt(
+        fresh, packet, "session-1", expected_scope="pilot"
+    )
+    assert fresh_reservation.nonce != reservation.nonce
 
 
 def _consume_result(receipt: Path) -> str:
@@ -869,7 +906,7 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
     assert "run_id must be a UUID" in result.stderr
 
 
-def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
+def test_failed_live_trial_never_completes_generation(tmp_path):
     manifest = tmp_path / "manifest.json"
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
@@ -880,6 +917,14 @@ def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
     )
     events = tmp_path / "events.jsonl"
     events.write_text("", encoding="utf-8")
+    run_id = "99756532-a866-4e91-8480-47adac64778e"
+    state = tmp_path / "run_state.json"
+    state.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    producer_manifest = tmp_path / "producer-manifest.json"
+    producer_manifest.write_text(
+        json.dumps(_producer_manifest_payload(state, events, run_id)), encoding="utf-8"
+    )
+    producer_manifest.chmod(0o600)
     provider_config = {
         "brainstormer": "gemini_api",
         "reviewer": "anthropic_api",
@@ -895,15 +940,21 @@ def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
                 "version": "expected-attempts/v1",
                 "task_id": "C1-R",
                 "trial_id": "01",
-                "run_id": "99756532-a866-4e91-8480-47adac64778e",
+                "run_id": run_id,
                 "provider_config": provider_config,
                 "attempts": [
                     {
                         "task_id": "C1-R",
-                        "stage": "planner",
-                        "provider_id": "openai_api",
+                        "stage": stage,
+                        "provider_id": provider_id,
                         "attempt": 1,
                     }
+                    for stage, provider_id in (
+                        ("brainstormer", "gemini_api"),
+                        ("reviewer", "anthropic_api"),
+                        ("planner", "openai_api"),
+                        ("executor", "claude-sonnet-5"),
+                    )
                 ],
             }
         ),
@@ -922,6 +973,8 @@ def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
         str(events),
         "--expected-attempts",
         str(expected),
+        "--producer-manifest",
+        str(producer_manifest),
         "--output",
         str(output),
     ]
@@ -930,7 +983,7 @@ def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
     result = subprocess.run(command, text=True, capture_output=True, env=env)
 
     assert result.returncode == 1
-    assert "producer-manifest" in result.stderr
+    assert "missing expected call events" in result.stderr
     assert not output.exists()
 
 
