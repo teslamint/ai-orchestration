@@ -289,7 +289,13 @@ def test_direct_vendor_stage_runs_full_cli_path_and_records_candidate_event(
             str(fragment_path),
         ],
         cwd=REPO_ROOT,
-        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+        env={
+            "PATH": os.environ["PATH"],
+            "PYTHONPATH": "src",
+            "AI_ORCHESTRATION_PRODUCER_ATTESTATION_KEY": os.environ[
+                "AI_ORCHESTRATION_PRODUCER_ATTESTATION_KEY"
+            ],
+        },
         capture_output=True,
         text=True,
         timeout=30,

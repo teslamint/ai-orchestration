@@ -17,9 +17,11 @@ from typing import Any
 
 from ai_orchestration.config import SlotKind, classify_slot
 from ai_orchestration.evals.dogfood import (
+    PRODUCER_ATTESTATION_KEY_ENV,
     ContractError,
     ExpectedAttempt,
     load_eval_contract,
+    producer_manifest_signature,
     validate_call_events,
     validate_result,
 )
@@ -633,6 +635,7 @@ def _producer_manifest(
         "state_sha256",
         "call_events_path",
         "call_events_sha256",
+        "producer_signature",
     }:
         raise ContractError("producer manifest has an unexpected shape")
     if (
@@ -644,6 +647,15 @@ def _producer_manifest(
         or not isinstance(payload["call_events_path"], str)
     ):
         raise ContractError("producer manifest is incomplete")
+    producer_signature = payload["producer_signature"]
+    if not _is_hex(producer_signature, 64):
+        raise ContractError("producer attestation is invalid")
+    producer_key = os.environ.get(PRODUCER_ATTESTATION_KEY_ENV)
+    if not producer_key:
+        raise ContractError("producer attestation key is unavailable")
+    expected_signature = producer_manifest_signature(payload, producer_key)
+    if not secrets.compare_digest(producer_signature, expected_signature):
+        raise ContractError("producer attestation is invalid")
     try:
         uuid.UUID(payload["run_id"])
     except ValueError as exc:

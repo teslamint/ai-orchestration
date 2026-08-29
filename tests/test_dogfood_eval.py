@@ -18,11 +18,46 @@ from ai_orchestration.evals.dogfood import (
     consume_receipt,
     grade_artifact,
     load_eval_contract,
+    producer_manifest_signature,
+    receipt_signature,
     validate_call_events,
     validate_result,
 )
 
 CONTRACT = Path("evals/dogfood/v1")
+TEST_APPROVAL_KEY = "cycle-one-test-approval-key-32-bytes"
+TEST_PRODUCER_KEY = "cycle-one-producer-attestation-key-32-bytes"
+
+
+def _eval_env() -> dict[str, str]:
+    return {
+        "PATH": os.environ["PATH"],
+        "PYTHONPATH": "src",
+        "AI_ORCHESTRATION_PRODUCER_ATTESTATION_KEY": TEST_PRODUCER_KEY,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _approval_key(monkeypatch):
+    monkeypatch.setenv("AI_ORCHESTRATION_USER_APPROVAL_KEY", TEST_APPROVAL_KEY)
+    monkeypatch.setenv("AI_ORCHESTRATION_PRODUCER_ATTESTATION_KEY", TEST_PRODUCER_KEY)
+
+
+def _producer_manifest_payload(
+    state: Path, events: Path, run_id: str
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "version": "producer-manifest/v1",
+        "run_id": run_id,
+        "state_path": str(state),
+        "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+        "call_events_path": str(events),
+        "call_events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
+    }
+    payload["producer_signature"] = producer_manifest_signature(
+        payload, TEST_PRODUCER_KEY
+    )
+    return payload
 
 
 def _load_eval_runner():
@@ -243,7 +278,7 @@ def test_compare_builds_pairs_terminal_latency_and_reports_unmeasured_cost():
 
 def _receipt(packet_sha256: str, session_id: str) -> dict[str, object]:
     now = datetime.now(timezone.utc)
-    return {
+    payload = {
         "version": "approval-receipt/v1",
         "nonce": "93c9c8762cbc4ecca3673ebc43a43e58",
         "issuer": "user",
@@ -254,6 +289,8 @@ def _receipt(packet_sha256: str, session_id: str) -> dict[str, object]:
         "expires_at": (now + timedelta(minutes=30)).isoformat(),
         "consumed_at": None,
     }
+    payload["approval_signature"] = receipt_signature(payload, TEST_APPROVAL_KEY)
+    return payload
 
 
 def test_receipt_is_packet_bound_mode_0600_and_one_shot(tmp_path):
@@ -298,6 +335,7 @@ def test_receipt_rejects_stale_permissions_and_concurrent_consumption(tmp_path):
     stale["expires_at"] = (
         datetime.now(timezone.utc) - timedelta(seconds=1)
     ).isoformat()
+    stale["approval_signature"] = receipt_signature(stale, TEST_APPROVAL_KEY)
     receipt = tmp_path / "stale.json"
     receipt.write_text(json.dumps(stale), encoding="utf-8")
     receipt.chmod(0o600)
@@ -328,6 +366,23 @@ def test_receipt_rejects_symlink(tmp_path):
     receipt.symlink_to(target)
 
     with pytest.raises(ContractError, match="symlink"):
+        consume_receipt(receipt, "a" * 64, "session-1", expected_scope="pilot")
+
+
+def test_receipt_requires_first_hand_approval_attestation(tmp_path, monkeypatch):
+    payload = _receipt("a" * 64, "session-1")
+    payload["approval_signature"] = "0" * 64
+    receipt = tmp_path / "unsigned.json"
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+    receipt.chmod(0o600)
+
+    with pytest.raises(ContractError, match="first-hand attestation"):
+        consume_receipt(receipt, "a" * 64, "session-1", expected_scope="pilot")
+
+    receipt.write_text(json.dumps(_receipt("a" * 64, "session-1")), encoding="utf-8")
+    receipt.chmod(0o600)
+    monkeypatch.delenv("AI_ORCHESTRATION_USER_APPROVAL_KEY")
+    with pytest.raises(ContractError, match="attestation key"):
         consume_receipt(receipt, "a" * 64, "session-1", expected_scope="pilot")
 
 
@@ -405,7 +460,7 @@ def test_cli_preflight_is_offline_and_live_commands_fail_closed(tmp_path):
         "--candidate-manifest",
         str(candidate),
     ]
-    env = {"PATH": os.environ["PATH"], "PYTHONPATH": "src"}
+    env = _eval_env()
     result = subprocess.run(command, text=True, capture_output=True, env=env)
     assert result.returncode == 0
     preflight = json.loads(result.stdout)
@@ -485,7 +540,7 @@ def test_cli_local_writes_private_output_and_rejects_symlinked_root(tmp_path):
         "--output",
         str(output),
     ]
-    env = {"PATH": os.environ["PATH"], "PYTHONPATH": "src"}
+    env = _eval_env()
     result = subprocess.run(command, text=True, capture_output=True, env=env)
     assert result.returncode == 0
     local_result = validate_result(output)
@@ -525,7 +580,7 @@ def test_cli_local_rejects_unknown_build_commit(tmp_path):
         ],
         text=True,
         capture_output=True,
-        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+        env=_eval_env(),
     )
     assert result.returncode == 1
     assert "commit" in result.stderr
@@ -557,7 +612,7 @@ def test_cli_local_rejects_unknown_build_commit(tmp_path):
         ],
         text=True,
         capture_output=True,
-        env={"PATH": os.environ["PATH"], "PYTHONPATH": "src"},
+        env=_eval_env(),
     )
     assert result.returncode == 1
     assert "HEAD" in result.stderr
@@ -572,17 +627,7 @@ def test_producer_manifest_rejects_changed_event_after_snapshot(tmp_path):
     events.write_bytes(b"current event bytes")
     manifest = tmp_path / "producer-manifest.json"
     manifest.write_text(
-        json.dumps(
-            {
-                "version": "producer-manifest/v1",
-                "run_id": run_id,
-                "state_path": str(state),
-                "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
-                "call_events_path": str(events),
-                "call_events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
-            }
-        ),
-        encoding="utf-8",
+        json.dumps(_producer_manifest_payload(state, events, run_id)), encoding="utf-8"
     )
     manifest.chmod(0o600)
 
@@ -593,6 +638,30 @@ def test_producer_manifest_rejects_changed_event_after_snapshot(tmp_path):
             expected_run_id=run_id,
             event_bytes=b"snapshot taken before replacement",
         )
+
+
+def test_producer_manifest_requires_trusted_attestation(tmp_path, monkeypatch):
+    module = _load_eval_runner()
+    run_id = "99756532-a866-4e91-8480-47adac64778e"
+    state = tmp_path / "run_state.json"
+    state.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    events = tmp_path / "call_events.jsonl"
+    events.write_bytes(b"current event bytes")
+    manifest = tmp_path / "producer-manifest.json"
+    payload = _producer_manifest_payload(state, events, run_id)
+    payload["producer_signature"] = "0" * 64
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    manifest.chmod(0o600)
+
+    with pytest.raises(module.ContractError, match="producer attestation"):
+        module._producer_manifest(manifest, event_path=events, expected_run_id=run_id)
+
+    payload = _producer_manifest_payload(state, events, run_id)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    manifest.chmod(0o600)
+    monkeypatch.delenv("AI_ORCHESTRATION_PRODUCER_ATTESTATION_KEY")
+    with pytest.raises(module.ContractError, match="attestation key"):
+        module._producer_manifest(manifest, event_path=events, expected_run_id=run_id)
 
 
 def test_producer_state_rejects_changed_snapshot(tmp_path):
@@ -692,17 +761,7 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
     state.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
     producer_manifest = tmp_path / "producer-manifest.json"
     producer_manifest.write_text(
-        json.dumps(
-            {
-                "version": "producer-manifest/v1",
-                "run_id": run_id,
-                "state_path": str(state),
-                "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
-                "call_events_path": str(events),
-                "call_events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
-            }
-        ),
-        encoding="utf-8",
+        json.dumps(_producer_manifest_payload(state, events, run_id)), encoding="utf-8"
     )
     producer_manifest.chmod(0o600)
     output = tmp_path / "candidate-fragment.json"
@@ -723,7 +782,7 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
         "--output",
         str(output),
     ]
-    env = {"PATH": os.environ["PATH"], "PYTHONPATH": "src"}
+    env = _eval_env()
 
     result = subprocess.run(command, text=True, capture_output=True, env=env)
 
@@ -789,6 +848,9 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
     producer_payload["call_events_sha256"] = hashlib.sha256(
         events.read_bytes()
     ).hexdigest()
+    producer_payload["producer_signature"] = producer_manifest_signature(
+        producer_payload, TEST_PRODUCER_KEY
+    )
     producer_manifest.write_text(json.dumps(producer_payload), encoding="utf-8")
     producer_manifest.chmod(0o600)
     expected_payload["attempts"][-1]["provider_id"] = "openai_api"
@@ -863,7 +925,7 @@ def test_cli_local_candidate_fragment_rejects_missing_direct_success(tmp_path):
         "--output",
         str(output),
     ]
-    env = {"PATH": os.environ["PATH"], "PYTHONPATH": "src"}
+    env = _eval_env()
 
     result = subprocess.run(command, text=True, capture_output=True, env=env)
 

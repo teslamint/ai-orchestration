@@ -6,6 +6,7 @@ execution stays fail-closed until the transport authorization gate lands.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -133,6 +134,27 @@ _EVENT_FIELDS = {
 }
 _CONTENT_FIELDS = {"prompt", "response", "messages", "system_prompt", "content"}
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_USER_APPROVAL_KEY_ENV = "AI_ORCHESTRATION_USER_APPROVAL_KEY"
+PRODUCER_ATTESTATION_KEY_ENV = "AI_ORCHESTRATION_PRODUCER_ATTESTATION_KEY"
+_RECEIPT_SIGNATURE_FIELDS = (
+    "version",
+    "nonce",
+    "issuer",
+    "scope",
+    "packet_sha256",
+    "session_id",
+    "issued_at",
+    "expires_at",
+    "consumed_at",
+)
+_PRODUCER_SIGNATURE_FIELDS = (
+    "version",
+    "run_id",
+    "state_path",
+    "state_sha256",
+    "call_events_path",
+    "call_events_sha256",
+)
 _CREDENTIAL_NAMES = {
     "CLIPROXYAPI_KEY",
     "OPENAI_API_KEY",
@@ -474,6 +496,41 @@ def _parse_time(value: Any, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _signature(
+    payload: Mapping[str, Any], fields: tuple[str, ...], key: str, key_error: str
+) -> str:
+    if not isinstance(key, str) or not key:
+        raise ContractError(key_error)
+    try:
+        signed = {name: payload[name] for name in fields}
+    except KeyError as exc:
+        raise ContractError("attestation fields are incomplete") from exc
+    canonical = json.dumps(
+        signed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hmac.new(key.encode("utf-8"), canonical, "sha256").hexdigest()
+
+
+def receipt_signature(payload: Mapping[str, Any], key: str) -> str:
+    """Create the HMAC attestation over the immutable receipt fields."""
+    return _signature(
+        payload,
+        _RECEIPT_SIGNATURE_FIELDS,
+        key,
+        "receipt attestation key is unavailable",
+    )
+
+
+def producer_manifest_signature(payload: Mapping[str, Any], key: str) -> str:
+    """Create the HMAC attestation over the producer manifest identity fields."""
+    return _signature(
+        payload,
+        _PRODUCER_SIGNATURE_FIELDS,
+        key,
+        "producer attestation key is unavailable",
+    )
+
+
 def consume_receipt(
     receipt: Path,
     packet_sha256: str,
@@ -504,6 +561,7 @@ def consume_receipt(
         "issued_at",
         "expires_at",
         "consumed_at",
+        "approval_signature",
     }
     if set(payload) != required or payload.get("version") != "approval-receipt/v1":
         raise ContractError("receipt has an unsupported shape or version")
@@ -519,6 +577,17 @@ def consume_receipt(
         raise ContractError("receipt session does not match")
     if payload["consumed_at"] is not None:
         raise ContractError("receipt was already consumed")
+    approval_signature = payload["approval_signature"]
+    if not isinstance(approval_signature, str) or not _HEX_64.fullmatch(
+        approval_signature
+    ):
+        raise ContractError("receipt first-hand attestation is invalid")
+    approval_key = os.environ.get(_USER_APPROVAL_KEY_ENV)
+    if not approval_key:
+        raise ContractError("receipt attestation key is unavailable")
+    expected_signature = receipt_signature(payload, approval_key)
+    if not hmac.compare_digest(approval_signature, expected_signature):
+        raise ContractError("receipt first-hand attestation is invalid")
     nonce = payload["nonce"]
     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce):
         raise ContractError("receipt nonce is invalid")

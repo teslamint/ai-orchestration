@@ -61,6 +61,10 @@ from ai_orchestration.errors import (
     StateError,
     TaskExecutionError,
 )
+from ai_orchestration.evals.dogfood import (
+    PRODUCER_ATTESTATION_KEY_ENV,
+    producer_manifest_signature,
+)
 from ai_orchestration.models.context import (
     ActionType,
     CodeReviewItem,
@@ -388,6 +392,12 @@ def _write_producer_manifest(
         "call_events_path": str(call_events_path.absolute()),
         "call_events_sha256": hashlib.sha256(call_events_bytes).hexdigest(),
     }
+    producer_key = os.environ.get(PRODUCER_ATTESTATION_KEY_ENV)
+    if not producer_key:
+        raise ConfigError(
+            f"{PRODUCER_ATTESTATION_KEY_ENV} is required to publish producer evidence"
+        )
+    manifest["producer_signature"] = producer_manifest_signature(manifest, producer_key)
     target = state_path.with_name("producer-manifest.json")
     fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
     try:
