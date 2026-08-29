@@ -2,11 +2,12 @@
 schema: plan/v1
 title: Measure Prompt Payloads Before Message Migration
 type: feat
-status: draft
+status: approved
 date: 2026-08-30
 execution: code
 origin: docs/specs/2026-08-30-prompt-payload-measurement-design.md
 deepened: true
+body_seal: 1730e5c7885b85f75d9ad83a327d8bdbb8dacc739715642c4a1ceb95447b4002
 ---
 
 # Goal
