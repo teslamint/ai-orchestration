@@ -299,7 +299,7 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
     candidate = _candidate_manifest(candidate_path, contract_path)
     return {
         "version": "dogfood-preflight/v1",
-        "adapter_eligibility": "open",
+        "adapter_eligibility": _adapter_eligibility(),
         "authorization_gate": "ready",
         "contract": contract.version,
         "baseline_commit": baseline["commit"],
@@ -317,6 +317,7 @@ def _approval_packet(args: argparse.Namespace) -> dict[str, Any]:
     )
     if args.scope not in {"pilot", "full"}:
         raise ContractError("approval-packet scope must be pilot or full")
+    _require_live_eligibility()
     load_eval_contract(contract_path)
     baseline = _baseline_manifest(baseline_path)
     candidate = _candidate_manifest(candidate_path, contract_path)
@@ -336,7 +337,20 @@ def _approval_packet(args: argparse.Namespace) -> dict[str, Any]:
 
 def _live(args: argparse.Namespace) -> dict[str, Any]:
     del args
-    raise ContractError("adapter_eligibility is open; live model execution is disabled")
+    _require_live_eligibility()
+    raise ContractError("live runner is not configured")
+
+
+def _adapter_eligibility() -> str:
+    """Return whether the complete V1 runner and adapters are usable."""
+    return "open"
+
+
+def _require_live_eligibility() -> None:
+    if _adapter_eligibility() != "closed":
+        raise ContractError(
+            "adapter_eligibility is open; live model execution is disabled"
+        )
 
 
 def _local(args: argparse.Namespace) -> dict[str, Any]:

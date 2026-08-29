@@ -406,6 +406,31 @@ def test_cli_preflight_is_offline_and_live_commands_fail_closed(tmp_path):
     assert preflight["output_root"] == candidate_manifest["output_root"]
     assert preflight["network_calls"] == 0
 
+    packet = tmp_path / "pilot-packet.json"
+    approval = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_dogfood_eval.py",
+            "approval-packet",
+            "--scope",
+            "pilot",
+            "--contract",
+            str(CONTRACT),
+            "--baseline-manifest",
+            str(baseline),
+            "--candidate-manifest",
+            str(candidate),
+            "--output",
+            str(packet),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert approval.returncode == 1
+    assert "adapter_eligibility" in approval.stderr
+    assert not packet.exists()
+
     candidate_manifest["commit"] = tree
     candidate.write_text(json.dumps(candidate_manifest), encoding="utf-8")
     result = subprocess.run(command, text=True, capture_output=True, env=env)
