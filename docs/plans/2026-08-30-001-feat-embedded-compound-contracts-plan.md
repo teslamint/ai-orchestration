@@ -2,10 +2,11 @@
 schema: plan/v1
 title: Embedded compound-loop contract adapter
 type: feat
-status: draft
+status: approved
 date: 2026-08-30
 execution: code
 origin: docs/specs/2026-08-30-embedded-compound-contracts-design.md
+body_seal: f8cce09dc91b7ad7a3cc1dabc70d9ae3c9ea723b926e8a3e15059ca748cbd351
 ---
 
 # Embedded Compound-loop Contract Adapter Plan
