@@ -22,13 +22,17 @@ WAIT_SECONDS = 10
 
 
 def test_ci_runs_live_lock_suite_on_linux_and_macos():
-    workflow = (REPO_ROOT / ".github/workflows/orchestrator-tests.yml").read_text(
-        encoding="utf-8"
+    lines = (
+        (REPO_ROOT / ".github/workflows/orchestrator-tests.yml")
+        .read_text(encoding="utf-8")
+        .splitlines()
     )
 
-    assert "ubuntu-latest" in workflow
-    assert "macos-latest" in workflow
-    assert "pytest -v tests/integration/test_live_run_lock.py" in workflow
+    assert "        os: [ubuntu-latest, macos-latest]" in lines
+    assert "  live-lock:" in lines
+    assert (
+        "        run: uv run pytest -v tests/integration/test_live_run_lock.py" in lines
+    )
 
 
 @dataclass
