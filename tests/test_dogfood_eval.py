@@ -1067,6 +1067,22 @@ def test_live_command_is_argument_vector_with_bounded_stage_profile(tmp_path):
     assert "shell=True" not in command
 
 
+def test_child_failure_diagnostic_is_bounded_and_redacts_secret_patterns():
+    runner = _load_eval_runner()
+
+    diagnostic = runner._child_failure_diagnostic(
+        b"prefix\nError: provider failed with api_token_"
+        + b"A" * 24
+        + b"\n"
+        + b"x" * 20_000,
+        b"",
+    )
+
+    assert diagnostic.startswith("Error: provider failed")
+    assert "api_token_" not in diagnostic
+    assert len(diagnostic) <= runner.MAX_CHILD_DIAGNOSTIC_BYTES
+
+
 def test_invocation_packet_is_content_free(tmp_path):
     runner = _load_eval_runner()
     payload = b'["claude","--print","secret-prompt-marker"]'

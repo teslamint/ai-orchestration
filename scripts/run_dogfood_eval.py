@@ -43,6 +43,8 @@ LIVE_BINARY_NAMES = {"agy", "claude", "codex"}
 LIVE_TIMEOUT_SECONDS = 300.0
 LIVE_RETRY_LIMIT = 0
 LIVE_TOKEN_CAP = 4096
+MAX_CHILD_DIAGNOSTIC_BYTES = 512
+MAX_CHILD_CAPTURE_BYTES = 64 * 1024
 LIVE_TASK_GOAL = (
     "Create a minimal runnable Python artifact named hello.py that prints exactly "
     "HELLO_DOGFOOD. Use no network, no secrets, and no files outside the assigned "
@@ -377,6 +379,24 @@ def _reject_symlink_components(path: Path) -> None:
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _child_failure_diagnostic(stdout: bytes, stderr: bytes) -> str:
+    """Return a bounded, secret-redacted child failure summary."""
+    captured = b"\n".join(part[-MAX_CHILD_CAPTURE_BYTES:] for part in (stdout, stderr))
+    sanitized = SECRET_PATTERN.sub(b"<redacted>", captured)
+    text = sanitized.decode("utf-8", errors="replace")
+    error_lines = [
+        line.strip() for line in text.splitlines() if line.strip().startswith("Error:")
+    ]
+    if error_lines:
+        return error_lines[-1][:MAX_CHILD_DIAGNOSTIC_BYTES]
+    if captured:
+        return (
+            f"child output had no structured error "
+            f"(bytes={len(captured)}, sha256={hashlib.sha256(captured).hexdigest()})"
+        )[:MAX_CHILD_DIAGNOSTIC_BYTES]
+    return "child output was empty"
 
 
 def _preflight(args: argparse.Namespace) -> dict[str, Any]:
@@ -1254,6 +1274,8 @@ def _run_live_trial(
         producer_key=producer_key,
     )
     process: subprocess.Popen[bytes] | None = None
+    stdout_capture = tempfile.TemporaryFile()
+    stderr_capture = tempfile.TemporaryFile()
     started = time.monotonic()
     try:
         process = subprocess.Popen(
@@ -1261,8 +1283,8 @@ def _run_live_trial(
             cwd=source_root,
             env=environment,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=stdout_capture,
+            stderr=stderr_capture,
             start_new_session=True,
         )
         broker.register_pid(process.pid)
@@ -1277,8 +1299,16 @@ def _run_live_trial(
                 f"live trial timed out: {trial['build']} {trial['trial_id']}"
             ) from exc
         if return_code != 0:
+            stdout_capture.flush()
+            stderr_capture.flush()
+            stdout_capture.seek(0)
+            stderr_capture.seek(0)
+            diagnostic = _child_failure_diagnostic(
+                stdout_capture.read(), stderr_capture.read()
+            )
             raise ContractError(
-                f"live trial exited {return_code}: {trial['build']} {trial['trial_id']}"
+                f"live trial exited {return_code}: {trial['build']} "
+                f"{trial['trial_id']} ({diagnostic})"
             )
     finally:
         if process is not None:
@@ -1289,6 +1319,8 @@ def _run_live_trial(
         _private_write(state_path, state)
         _remove_detached_worktree(source_root)
         shutil.rmtree(source_parent, ignore_errors=True)
+        stdout_capture.close()
+        stderr_capture.close()
 
     elapsed_ms = max(1, int((time.monotonic() - started) * 1000))
     project_root = (
