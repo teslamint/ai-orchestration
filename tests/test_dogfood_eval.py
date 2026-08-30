@@ -1201,6 +1201,34 @@ def test_invocation_packet_accepts_legacy_gate_request_shape(tmp_path):
     assert packet["retry_limit"] is None
 
 
+def test_live_state_clears_stale_error_when_loading_new_batch(tmp_path):
+    runner = _load_eval_runner()
+    state_path = tmp_path / "live-eval-state.json"
+    runner._private_write(
+        state_path,
+        {
+            "version": "live-eval-state/v1",
+            "completed_trials": [],
+            "last_error": "OSError",
+            "error_type": "ContractError",
+        },
+    )
+    packet = {
+        "session_id": "session-new",
+        "scope": "pilot",
+        "output_root": str(tmp_path),
+    }
+
+    state = runner._load_live_state(
+        state_path,
+        packet,
+        SimpleNamespace(reservation_path=tmp_path / "batch-receipt.reserved"),
+    )
+
+    assert "last_error" not in state
+    assert "error_type" not in state
+
+
 def test_live_authorization_broker_relays_one_packet_bound_receipt(tmp_path):
     runner = _load_eval_runner()
     socket_path = runner._new_socket_path()

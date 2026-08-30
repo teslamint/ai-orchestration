@@ -882,6 +882,8 @@ def _load_live_state(
             raise ContractError("live eval completed trial state is invalid")
     else:
         state = {"version": "live-eval-state/v1", "completed_trials": []}
+    state.pop("last_error", None)
+    state.pop("error_type", None)
     state.update(
         {
             "session_id": packet["session_id"],
