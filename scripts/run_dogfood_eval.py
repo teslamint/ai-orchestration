@@ -731,14 +731,12 @@ def _is_resumable_trial(trial_root: Path) -> bool:
     try:
         state = _object(state_path)
         completed = state.get("completed_stages")
+        required = {"brainstormer", "brainstorming_reviewer", "planner"}
+        allowed = required | {"executor"}
         if (
             not isinstance(completed, list)
-            or not {
-                "brainstormer",
-                "brainstorming_reviewer",
-                "planner",
-            }.issubset(completed)
-            or "executor" in completed
+            or not required.issubset(completed)
+            or not set(completed).issubset(allowed)
         ):
             return False
         for line in events_path.read_text(encoding="utf-8").splitlines():
@@ -748,6 +746,27 @@ def _is_resumable_trial(trial_root: Path) -> bool:
     except (ContractError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
     return True
+
+
+def _write_runner_observer_manifest(
+    path: Path, *, state_path: Path, event_path: Path, producer_key: str
+) -> None:
+    """Bind a baseline snapshot when the older child cannot self-attest."""
+    state_bytes = _input_snapshot(state_path, "producer state")
+    event_bytes = _input_snapshot(event_path, "call-event")
+    state = json.loads(state_bytes)
+    if not isinstance(state, dict) or not isinstance(state.get("run_id"), str):
+        raise ContractError("producer state is invalid JSON")
+    manifest = {
+        "version": "producer-manifest/v1",
+        "run_id": state["run_id"],
+        "state_path": str(state_path.absolute()),
+        "state_sha256": hashlib.sha256(state_bytes).hexdigest(),
+        "call_events_path": str(event_path.absolute()),
+        "call_events_sha256": hashlib.sha256(event_bytes).hexdigest(),
+    }
+    manifest["producer_signature"] = producer_manifest_signature(manifest, producer_key)
+    _private_write(path, manifest)
 
 
 def _invocation_packet(
@@ -1484,6 +1503,15 @@ def _live_trial_result(
         raise ContractError("live trial did not produce an isolated project root")
     events_path = project_root / ".ai_orchestration" / "call_events.jsonl"
     producer_path = project_root / ".ai_orchestration" / "producer-manifest.json"
+    producer_source = "child"
+    if not producer_path.exists():
+        _write_runner_observer_manifest(
+            producer_path,
+            state_path=project_root / ".ai_orchestration" / "run_state.json",
+            event_path=events_path,
+            producer_key=producer_key,
+        )
+        producer_source = "runner_observed_snapshot"
     previous_key = os.environ.get(PRODUCER_ATTESTATION_KEY_ENV)
     os.environ[PRODUCER_ATTESTATION_KEY_ENV] = producer_key
     try:
@@ -1529,6 +1557,7 @@ def _live_trial_result(
         "stability_checks": {
             "call_events_valid": validation.valid,
             "producer_manifest_valid": True,
+            "producer_manifest_source": producer_source,
             "external_cli_authenticated": True,
         },
         "test_passed": True,

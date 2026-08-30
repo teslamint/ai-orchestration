@@ -1087,7 +1087,12 @@ def test_resumable_trial_rejects_failed_or_unplanned_state(tmp_path):
     metadata = project / ".ai_orchestration"
     metadata.mkdir(parents=True)
     state = {
-        "completed_stages": ["brainstormer", "brainstorming_reviewer", "planner"],
+        "completed_stages": [
+            "brainstormer",
+            "brainstorming_reviewer",
+            "planner",
+            "executor",
+        ],
         "outputs": {"context": {}},
     }
     (metadata / "run_state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -1100,6 +1105,32 @@ def test_resumable_trial_rejects_failed_or_unplanned_state(tmp_path):
     state["completed_stages"] = ["brainstormer"]
     (metadata / "run_state.json").write_text(json.dumps(state), encoding="utf-8")
     assert not runner._is_resumable_trial(tmp_path)
+
+
+def test_runner_observer_manifest_binds_snapshot_without_child_manifest(tmp_path):
+    runner = _load_eval_runner()
+    state = tmp_path / "run_state.json"
+    events = tmp_path / "call_events.jsonl"
+    manifest = tmp_path / "producer-manifest.json"
+    state.write_text(
+        json.dumps({"run_id": "31b98181-f6f6-4960-ba61-fe2bbbcc2500"}),
+        encoding="utf-8",
+    )
+    events.write_text("snapshot\n", encoding="utf-8")
+
+    runner._write_runner_observer_manifest(
+        manifest,
+        state_path=state,
+        event_path=events,
+        producer_key=TEST_PRODUCER_KEY,
+    )
+
+    producer = runner._producer_manifest(
+        manifest,
+        event_path=events,
+        expected_run_id="31b98181-f6f6-4960-ba61-fe2bbbcc2500",
+    )
+    assert producer["state_sha256"] == hashlib.sha256(state.read_bytes()).hexdigest()
 
 
 def test_child_failure_diagnostic_is_bounded_and_redacts_secret_patterns():
