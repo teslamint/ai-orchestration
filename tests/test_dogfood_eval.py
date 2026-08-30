@@ -1178,3 +1178,38 @@ def test_live_artifact_manifest_rejects_secret_patterns(tmp_path):
 
     with pytest.raises(ContractError, match="secret pattern"):
         runner._artifact_manifest(tmp_path)
+
+
+def test_issue_receipt_binds_user_key_packet_and_scope(tmp_path):
+    runner = _load_eval_runner()
+    packet = tmp_path / "pilot-packet.json"
+    packet.write_text(
+        json.dumps(
+            {
+                "version": "approval-packet/v1",
+                "scope": "pilot",
+                "session_id": "session-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "pilot-receipt.json"
+
+    issued = runner._issue_receipt(
+        SimpleNamespace(
+            packet=str(packet),
+            scope="pilot",
+            session_id="session-1",
+            output=str(output),
+        )
+    )
+
+    assert issued["packet_sha256"] == hashlib.sha256(packet.read_bytes()).hexdigest()
+    assert output.stat().st_mode & 0o777 == 0o600
+    reservation = consume_receipt(
+        output,
+        issued["packet_sha256"],
+        "session-1",
+        expected_scope="pilot",
+    )
+    assert reservation.scope == "pilot"

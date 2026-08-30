@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ from ai_orchestration.evals.dogfood import (
     consume_receipt,
     load_eval_contract,
     producer_manifest_signature,
+    receipt_signature,
     validate_call_events,
     validate_result,
 )
@@ -121,6 +122,9 @@ def _parser() -> argparse.ArgumentParser:
 
     authorize = commands.add_parser("authorize-invocation")
     _add(authorize, "--packet", "--receipt", "--state")
+
+    issue_receipt = commands.add_parser("issue-receipt")
+    _add(issue_receipt, "--packet", "--scope", "--session-id", "--output")
 
     grading_packet = commands.add_parser("grading-packet")
     _add(grading_packet, "--state", "--artifact-manifest", "--output")
@@ -1174,6 +1178,46 @@ def _authorize_invocation(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _issue_receipt(args: argparse.Namespace) -> dict[str, Any]:
+    packet_path, output = _required(args, "packet", "output")
+    scope = getattr(args, "scope", None)
+    session_id = getattr(args, "session_id", None)
+    if scope not in {"pilot", "full", "grading", "invocation"}:
+        raise ContractError("receipt scope is invalid")
+    if not isinstance(session_id, str) or not session_id:
+        raise ContractError("receipt session id is required")
+    packet = _object(packet_path)
+    if packet.get("session_id") != session_id:
+        raise ContractError("receipt session id does not match packet")
+    packet_version = packet.get("version")
+    if scope in {"pilot", "full"} and packet_version != "approval-packet/v1":
+        raise ContractError("batch receipt requires an approval packet")
+    if scope == "invocation" and packet_version != "next-invocation-packet/v1":
+        raise ContractError("invocation receipt requires a next invocation packet")
+    issued = datetime.now(timezone.utc)
+    receipt: dict[str, Any] = {
+        "version": "approval-receipt/v1",
+        "nonce": secrets.token_hex(16),
+        "issuer": "user",
+        "scope": scope,
+        "packet_sha256": _digest(packet_path),
+        "session_id": session_id,
+        "issued_at": issued.isoformat(),
+        "expires_at": (issued + timedelta(minutes=30)).isoformat(),
+        "consumed_at": None,
+    }
+    approval_key = os.environ.get("AI_ORCHESTRATION_USER_APPROVAL_KEY")
+    receipt["approval_signature"] = receipt_signature(receipt, approval_key or "")
+    _private_write(output, receipt)
+    return {
+        "version": "receipt-issued/v1",
+        "scope": scope,
+        "session_id": session_id,
+        "packet_sha256": receipt["packet_sha256"],
+        "output": str(output.absolute()),
+    }
+
+
 def _run_live_trial(
     *,
     packet: dict[str, Any],
@@ -1796,6 +1840,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _approval_packet(args)
         elif args.command == "authorize-invocation":
             result = _authorize_invocation(args)
+        elif args.command == "issue-receipt":
+            result = _issue_receipt(args)
         elif args.command in {"pilot", "full", "grading"}:
             result = _live(args)
         elif args.command == "grading-packet":
