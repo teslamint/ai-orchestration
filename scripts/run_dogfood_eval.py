@@ -931,10 +931,8 @@ class _AuthorizationBroker:
                 socket_path=self.socket_path,
                 model=self.model,
             )
-            if Path(packet["payload_path"]).parent != self.payload_path.parent:
-                raise ContractError(
-                    "authorization payload is outside the live evidence root"
-                )
+            if Path(packet["payload_path"]) != self.payload_path:
+                raise ContractError("authorization payload path is not runner-owned")
             _private_write(self.next_packet_path, packet)
             event = threading.Event()
             response_box: dict[str, Any] = {}
@@ -1040,6 +1038,10 @@ class _AuthorizationBroker:
             request_id = relay["request_id"]
             if not isinstance(request_id, str):
                 raise ContractError("authorization relay request id is invalid")
+            if response["request_id"] != request_id:
+                raise ContractError(
+                    "authorization relay request id does not match response"
+                )
             with self._lock:
                 pending = self._pending.get(request_id)
                 if pending is None:
@@ -1414,6 +1416,7 @@ def _artifact_manifest(root: Path) -> dict[str, Any]:
         size = path.stat().st_size
         if size > 4 * 1024 * 1024:
             raise ContractError(f"live artifact file exceeds the bounded size: {path}")
+        _assert_artifact_file_safe(path)
         files.append(
             {
                 "path": str(path.relative_to(root)),
@@ -1428,6 +1431,16 @@ def _artifact_manifest(root: Path) -> dict[str, Any]:
         "root": str(root.absolute()),
         "files": files,
     }
+
+
+def _assert_artifact_file_safe(path: Path) -> None:
+    tail = b""
+    with path.open("rb") as handle:
+        while chunk := handle.read(64 * 1024):
+            window = tail + chunk
+            if _contains_secret(window):
+                raise ContractError(f"live artifact contains a secret pattern: {path}")
+            tail = window[-256:]
 
 
 def _file_digest(path: Path) -> str:

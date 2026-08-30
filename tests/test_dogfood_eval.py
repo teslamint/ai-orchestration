@@ -1169,3 +1169,12 @@ def test_live_authorization_broker_relays_one_packet_bound_receipt(tmp_path):
         assert not payload_path.exists()
     finally:
         broker.stop()
+
+
+def test_live_artifact_manifest_rejects_secret_patterns(tmp_path):
+    runner = _load_eval_runner()
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("api_token_" + "A" * 20, encoding="utf-8")
+
+    with pytest.raises(ContractError, match="secret pattern"):
+        runner._artifact_manifest(tmp_path)
