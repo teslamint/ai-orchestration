@@ -665,7 +665,12 @@ def _live_schedule(scope: str) -> list[dict[str, str]]:
 
 
 def _build_live_command(
-    *, source_root: Path, workspace_root: Path, project_name: str, binary_path: str
+    *,
+    source_root: Path,
+    workspace_root: Path,
+    project_name: str,
+    binary_path: str,
+    resume: bool = False,
 ) -> list[str]:
     del source_root
     binary_name = Path(binary_path).name
@@ -683,6 +688,8 @@ def _build_live_command(
         "--auto-approve",
         "--skip-review",
     ]
+    if resume:
+        command.append("--resume")
     for option in (
         "brainstormer",
         "reviewer",
@@ -693,6 +700,54 @@ def _build_live_command(
     ):
         command.extend([f"--{option}", binary_name])
     return command
+
+
+def _is_resumable_trial(trial_root: Path) -> bool:
+    """Accept only a clean, planner-complete partial trial for resume."""
+    if (trial_root / "result.json").exists():
+        return False
+    workspace_root = trial_root / "workspace"
+    if not workspace_root.is_dir() or workspace_root.is_symlink():
+        return False
+    projects = [
+        path
+        for path in workspace_root.iterdir()
+        if path.is_dir() and not path.is_symlink()
+    ]
+    if len(projects) != 1:
+        return False
+    metadata = projects[0] / ".ai_orchestration"
+    state_path = metadata / "run_state.json"
+    events_path = metadata / "call_events.jsonl"
+    if (
+        not metadata.is_dir()
+        or metadata.is_symlink()
+        or not state_path.is_file()
+        or state_path.is_symlink()
+        or not events_path.is_file()
+        or events_path.is_symlink()
+    ):
+        return False
+    try:
+        state = _object(state_path)
+        completed = state.get("completed_stages")
+        if (
+            not isinstance(completed, list)
+            or not {
+                "brainstormer",
+                "brainstorming_reviewer",
+                "planner",
+            }.issubset(completed)
+            or "executor" in completed
+        ):
+            return False
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict) or event.get("outcome") != "success":
+                return False
+    except (ContractError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return True
 
 
 def _invocation_packet(
@@ -1263,10 +1318,12 @@ def _run_live_trial(
         / f"{trial['build']}-{trial['task_id']}-{trial['trial_id']}"
     )
     workspace_root = trial_root / "workspace"
-    if trial_root.exists():
+    resuming = trial_root.exists()
+    if resuming and not _is_resumable_trial(trial_root):
         raise ContractError(f"live trial output already exists: {trial_root}")
     _reject_symlink_components(trial_root)
-    workspace_root.mkdir(parents=True, exist_ok=False)
+    if not resuming:
+        workspace_root.mkdir(parents=True, exist_ok=False)
     source_parent = Path(tempfile.mkdtemp(prefix="dogfood-live-source-"))
     source_root = source_parent / "source"
     commit = packet[f"{trial['build']}_commit"]
@@ -1277,6 +1334,7 @@ def _run_live_trial(
         workspace_root=workspace_root,
         project_name=f"{trial['build']}_{trial['task_id'].lower().replace('-', '_')}_{trial['trial_id']}",
         binary_path=profile["binary_path"],
+        resume=resuming,
     )
     environment = _child_environment(
         source_root=source_root,

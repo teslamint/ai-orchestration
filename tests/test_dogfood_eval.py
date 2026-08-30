@@ -1067,6 +1067,41 @@ def test_live_command_is_argument_vector_with_bounded_stage_profile(tmp_path):
     assert "shell=True" not in command
 
 
+def test_live_command_resumes_a_partial_trial(tmp_path):
+    runner = _load_eval_runner()
+
+    command = runner._build_live_command(
+        source_root=tmp_path / "source",
+        workspace_root=tmp_path / "trial",
+        project_name="c1_e_01",
+        binary_path="/opt/homebrew/bin/claude",
+        resume=True,
+    )
+
+    assert "--resume" in command
+
+
+def test_resumable_trial_rejects_failed_or_unplanned_state(tmp_path):
+    runner = _load_eval_runner()
+    project = tmp_path / "workspace" / "c1_e_01"
+    metadata = project / ".ai_orchestration"
+    metadata.mkdir(parents=True)
+    state = {
+        "completed_stages": ["brainstormer", "brainstorming_reviewer", "planner"],
+        "outputs": {"context": {}},
+    }
+    (metadata / "run_state.json").write_text(json.dumps(state), encoding="utf-8")
+    (metadata / "call_events.jsonl").write_text(
+        json.dumps({"outcome": "success"}) + "\n", encoding="utf-8"
+    )
+
+    assert runner._is_resumable_trial(tmp_path)
+
+    state["completed_stages"] = ["brainstormer"]
+    (metadata / "run_state.json").write_text(json.dumps(state), encoding="utf-8")
+    assert not runner._is_resumable_trial(tmp_path)
+
+
 def test_child_failure_diagnostic_is_bounded_and_redacts_secret_patterns():
     runner = _load_eval_runner()
 
