@@ -7,11 +7,18 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
+import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +27,7 @@ from ai_orchestration.evals.dogfood import (
     PRODUCER_ATTESTATION_KEY_ENV,
     ContractError,
     ExpectedAttempt,
+    consume_receipt,
     load_eval_contract,
     producer_manifest_signature,
     validate_call_events,
@@ -27,6 +35,47 @@ from ai_orchestration.evals.dogfood import (
 )
 
 LIVE_COMMANDS = {"pilot", "full", "grading", "authorize-invocation"}
+LIVE_BINARY_ENV = "AI_ORCHESTRATION_LIVE_BINARY"
+LIVE_MODEL_ENV = "AI_ORCHESTRATION_LIVE_MODEL"
+LIVE_TIMEOUT_ENV = "AI_ORCHESTRATION_LIVE_TIMEOUT_SECONDS"
+LIVE_BINARY_NAMES = {"agy", "claude", "codex"}
+LIVE_TIMEOUT_SECONDS = 300.0
+LIVE_RETRY_LIMIT = 0
+LIVE_TOKEN_CAP = 4096
+LIVE_TASK_GOAL = (
+    "Create a minimal runnable Python artifact named hello.py that prints exactly "
+    "HELLO_DOGFOOD. Use no network, no secrets, and no files outside the assigned "
+    "workspace. Return a concise plan and implement it."
+)
+LIVE_EXPECTED_STAGES = ("brainstormer", "reviewer", "planner", "executor")
+LIVE_ENVIRONMENT_NAMES = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "VIRTUAL_ENV",
+)
+AUTHORIZATION_REQUEST_FIELDS = {
+    "version",
+    "request_id",
+    "transport",
+    "payload_path",
+    "payload_sha256",
+    "destination",
+    "timeout_seconds",
+    "retry_limit",
+}
+AUTHORIZATION_RESPONSE_FIELDS = {
+    "version",
+    "request_id",
+    "payload_sha256",
+    "authorized",
+}
+SECRET_PATTERN = re.compile(
+    rb"(?i)(?:bearer\s+|(?:sk|api|token)[_-])[A-Za-z0-9._-]{16,}"
+)
 STAGE_NAMES = {
     "brainstormer",
     "reviewer",
@@ -333,9 +382,10 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
     contract = load_eval_contract(contract_path)
     baseline = _baseline_manifest(baseline_path)
     candidate = _candidate_manifest(candidate_path, contract_path)
+    profile = _live_profile()
     return {
         "version": "dogfood-preflight/v1",
-        "adapter_eligibility": _adapter_eligibility(),
+        "adapter_eligibility": profile["eligibility"],
         "authorization_gate": "ready",
         "contract": contract.version,
         "baseline_commit": baseline["commit"],
@@ -344,6 +394,7 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
         "command_sha256": candidate["command_sha256"],
         "output_root": candidate["output_root"],
         "network_calls": 0,
+        "live_profile": profile,
     }
 
 
@@ -357,6 +408,8 @@ def _approval_packet(args: argparse.Namespace) -> dict[str, Any]:
     load_eval_contract(contract_path)
     baseline = _baseline_manifest(baseline_path)
     candidate = _candidate_manifest(candidate_path, contract_path)
+    profile = _live_profile()
+    output_root = output.absolute().parent
     packet = {
         "version": "approval-packet/v1",
         "scope": args.scope,
@@ -364,22 +417,1030 @@ def _approval_packet(args: argparse.Namespace) -> dict[str, Any]:
         "contract_sha256": _digest(contract_path / "dataset.json"),
         "baseline_commit": baseline["commit"],
         "candidate_commit": candidate["commit"],
-        "adapter_eligibility": "open",
+        "candidate_command_sha256": candidate["command_sha256"],
+        "adapter_eligibility": profile["eligibility"],
         "authorization_gate": "ready",
+        "adapter": {
+            "provider_kind": "cli_binary",
+            "binary_name": profile["binary_name"],
+            "binary_path": profile["binary_path"],
+            "model": profile["model"],
+            "auth_probe": "read-only",
+        },
+        "schedule": _live_schedule(args.scope),
+        "limits": {
+            "max_routing_invocations_per_trial": len(LIVE_EXPECTED_STAGES),
+            "timeout_seconds": profile["timeout_seconds"],
+            "retry_limit": LIVE_RETRY_LIMIT,
+            "token_cap_per_invocation": LIVE_TOKEN_CAP,
+            "cost_status": "not_measurable",
+            "cost_cap": None,
+        },
+        "environment_names": list(LIVE_ENVIRONMENT_NAMES),
+        "output_root": str(output_root),
     }
     _private_write(output, packet)
     return packet
 
 
 def _live(args: argparse.Namespace) -> dict[str, Any]:
-    del args
     _require_live_eligibility()
-    raise ContractError("live runner is not configured")
+    packet_path, receipt_path, state_path = _required(
+        args, "packet", "receipt", "state"
+    )
+    packet = _approval_packet_object(packet_path)
+    if state_path.absolute().parent != Path(packet["output_root"]).absolute():
+        raise ContractError("live state must be inside the approval packet output root")
+    reservation = consume_receipt(
+        receipt_path,
+        _digest(packet_path),
+        packet["session_id"],
+        expected_scope=packet["scope"],
+    )
+    profile = _live_profile()
+    state = _load_live_state(state_path, packet, reservation)
+    state["packet_sha256"] = _digest(packet_path)
+    socket_path = _new_socket_path()
+    next_packet_path = state_path.absolute().parent / "next-invocation-packet.json"
+    payload_path = state_path.absolute().parent / ".pending-payload.bin"
+    for path in (socket_path, next_packet_path, payload_path):
+        _reject_symlink_components(path.absolute())
+    state_path.absolute().parent.mkdir(parents=True, exist_ok=True)
+    if next_packet_path.exists():
+        raise ContractError(
+            f"live invocation packet already exists: {next_packet_path}"
+        )
+    if payload_path.exists():
+        raise ContractError(
+            f"live authorization payload already exists: {payload_path}"
+        )
+
+    broker = _AuthorizationBroker(
+        socket_path=socket_path,
+        next_packet_path=next_packet_path,
+        payload_path=payload_path,
+        state_path=state_path,
+        session_id=packet["session_id"],
+        model=profile["model"],
+        timeout=profile["timeout_seconds"],
+    )
+    completed = set(state.get("completed_trials", []))
+    try:
+        broker.start()
+        state.update(
+            {
+                "status": "running",
+                "socket_path": str(socket_path.absolute()),
+                "next_packet_path": str(next_packet_path.absolute()),
+                "owned_pids": [],
+                "cleanup": {"socket_removed": False, "payload_absent": False},
+            }
+        )
+        _private_write(state_path, state)
+        for trial in packet["schedule"]:
+            trial_key = f"{trial['build']}:{trial['task_id']}:{trial['trial_id']}"
+            if trial_key in completed:
+                continue
+            result_path, pid = _run_live_trial(
+                packet=packet,
+                trial=trial,
+                profile=profile,
+                state=state,
+                state_path=state_path,
+                broker=broker,
+            )
+            completed.add(trial_key)
+            state["completed_trials"] = sorted(completed)
+            state["last_result_path"] = str(result_path.absolute())
+            state["owned_pids"] = []
+            _private_write(state_path, state)
+            del pid
+        state.update(
+            {
+                "status": "completed",
+                "cleanup": {"socket_removed": False, "payload_absent": False},
+            }
+        )
+        _private_write(state_path, state)
+        return state
+    except BaseException as exc:
+        state.update(
+            {
+                "status": "failed",
+                "error_type": exc.__class__.__name__,
+                "owned_pids": broker.owned_pids(),
+            }
+        )
+        _private_write(state_path, state)
+        raise
+    finally:
+        broker.stop()
+        if payload_path.exists():
+            payload_path.unlink(missing_ok=True)
+        if next_packet_path.exists():
+            next_packet_path.unlink(missing_ok=True)
+        socket_path.unlink(missing_ok=True)
+        if state_path.exists() and not state_path.is_symlink():
+            final_state = _object(state_path)
+            final_state["owned_pids"] = []
+            final_state["cleanup"] = {
+                "socket_removed": not socket_path.exists(),
+                "payload_absent": not payload_path.exists(),
+            }
+            if final_state.get("status") == "running":
+                final_state["status"] = "interrupted"
+            _private_write(state_path, final_state)
+
+
+def _live_profile() -> dict[str, Any]:
+    binary_name = os.environ.get(LIVE_BINARY_ENV, "").strip()
+    timeout = _live_timeout()
+    base = {
+        "eligibility": "open",
+        "binary_name": binary_name or None,
+        "binary_path": None,
+        "model": os.environ.get(LIVE_MODEL_ENV, "cli-configured-default"),
+        "timeout_seconds": timeout,
+        "reason": "explicit authenticated CLI profile is required",
+    }
+    if not binary_name:
+        return base
+    if binary_name not in LIVE_BINARY_NAMES:
+        base["reason"] = "live binary is not an approved CLI provider"
+        return base
+    binary_path = shutil.which(binary_name)
+    if binary_path is None:
+        base["reason"] = "configured live binary is not on PATH"
+        return base
+    base["binary_path"] = binary_path
+    if not _cli_auth_status(binary_name, binary_path):
+        base["reason"] = "configured CLI authentication status is not logged in"
+        return base
+    base.update(
+        {
+            "eligibility": "closed",
+            "reason": "read-only CLI authentication status is logged in",
+        }
+    )
+    return base
+
+
+def _live_timeout() -> float:
+    raw = os.environ.get(LIVE_TIMEOUT_ENV, str(LIVE_TIMEOUT_SECONDS))
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise ContractError(f"{LIVE_TIMEOUT_ENV} must be numeric") from exc
+    if timeout <= 0 or timeout > 1800:
+        raise ContractError(f"{LIVE_TIMEOUT_ENV} must be between 0 and 1800 seconds")
+    return timeout
+
+
+def _cli_auth_status(binary_name: str, binary_path: str) -> bool:
+    command = {
+        "claude": [binary_path, "auth", "status"],
+        "codex": [binary_path, "login", "status"],
+    }.get(binary_name)
+    if command is None:
+        return False
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    if binary_name == "claude":
+        try:
+            status = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(status, dict) and status.get("loggedIn") is True
+    return "logged in" in result.stdout.lower()
+
+
+def _live_schedule(scope: str) -> list[dict[str, str]]:
+    trial_ids = ("01",) if scope == "pilot" else ("02", "03")
+    return [
+        {"build": build, "task_id": "C1-E", "trial_id": trial_id}
+        for trial_id in trial_ids
+        for build in ("baseline", "candidate")
+    ]
+
+
+def _build_live_command(
+    *, source_root: Path, workspace_root: Path, project_name: str, binary_path: str
+) -> list[str]:
+    del source_root
+    binary_name = Path(binary_path).name
+    command = [
+        sys.executable,
+        "-m",
+        "ai_orchestration.cli",
+        LIVE_TASK_GOAL,
+        "--workspace",
+        str(workspace_root.absolute()),
+        "--project-name",
+        project_name,
+        "--auto-select",
+        "--auto-run",
+        "--auto-approve",
+        "--skip-review",
+    ]
+    for option in (
+        "brainstormer",
+        "reviewer",
+        "planner",
+        "executor",
+        "code-reviewer",
+        "fixer",
+    ):
+        command.extend([f"--{option}", binary_name])
+    return command
+
+
+def _invocation_packet(
+    request: dict[str, Any],
+    *,
+    session_id: str,
+    socket_path: Path,
+    model: str = "cli-configured-default",
+) -> dict[str, Any]:
+    if set(request) != AUTHORIZATION_REQUEST_FIELDS:
+        raise ContractError("authorization request has an unexpected shape")
+    if request["version"] != "authorization-request/v1":
+        raise ContractError("authorization request version is unsupported")
+    if request["transport"] not in {"http_json", "cli_argv"}:
+        raise ContractError("authorization request transport is invalid")
+    payload_path = Path(request["payload_path"])
+    if not payload_path.is_absolute():
+        raise ContractError("authorization payload path must be absolute")
+    if not _is_hex(request["payload_sha256"], 64):
+        raise ContractError("authorization payload digest is invalid")
+    payload = _input_snapshot(payload_path, "authorization payload")
+    if hashlib.sha256(payload).hexdigest() != request["payload_sha256"]:
+        raise ContractError("authorization payload digest does not match")
+    if _contains_secret(payload):
+        raise ContractError(
+            "authorization payload contains a credential or secret pattern"
+        )
+    return {
+        "version": "next-invocation-packet/v1",
+        "session_id": session_id,
+        "scope": "invocation",
+        "request_id": request["request_id"],
+        "transport": request["transport"],
+        "payload_path": str(payload_path.absolute()),
+        "payload_sha256": request["payload_sha256"],
+        "payload_bytes": len(payload),
+        "destination": request["destination"],
+        "model": model,
+        "timeout_seconds": request["timeout_seconds"],
+        "retry_limit": request["retry_limit"],
+        "socket_path": str(socket_path.absolute()),
+    }
+
+
+def _contains_secret(payload: bytes) -> bool:
+    for name in (
+        "CLIPROXYAPI_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_AI_API_KEY",
+    ):
+        value = os.environ.get(name)
+        if value and len(value) >= 8 and value.encode() in payload:
+            return True
+    return SECRET_PATTERN.search(payload) is not None
+
+
+def _approval_packet_object(path: Path) -> dict[str, Any]:
+    payload = _object(path)
+    required = {
+        "version",
+        "scope",
+        "session_id",
+        "contract_sha256",
+        "baseline_commit",
+        "candidate_commit",
+        "candidate_command_sha256",
+        "adapter_eligibility",
+        "authorization_gate",
+        "adapter",
+        "schedule",
+        "limits",
+        "environment_names",
+        "output_root",
+    }
+    if set(payload) != required or payload["version"] != "approval-packet/v1":
+        raise ContractError("approval packet has an unexpected shape")
+    if payload["scope"] not in {"pilot", "full"}:
+        raise ContractError("approval packet scope is invalid")
+    if not isinstance(payload["session_id"], str) or not payload["session_id"]:
+        raise ContractError("approval packet session is invalid")
+    if (
+        payload["adapter_eligibility"] != "closed"
+        or payload["authorization_gate"] != "ready"
+    ):
+        raise ContractError("approval packet is not eligible for live execution")
+    if not isinstance(payload["schedule"], list) or payload[
+        "schedule"
+    ] != _live_schedule(payload["scope"]):
+        raise ContractError("approval packet schedule is invalid")
+    if (
+        not isinstance(payload["output_root"], str)
+        or not Path(payload["output_root"]).is_absolute()
+    ):
+        raise ContractError("approval packet output root is invalid")
+    return payload
+
+
+def _load_live_state(
+    state_path: Path, packet: dict[str, Any], reservation: Any
+) -> dict[str, Any]:
+    if state_path.exists():
+        state = _object(state_path)
+        if state.get("version") != "live-eval-state/v1":
+            raise ContractError("live eval state version is unsupported")
+        completed = state.get("completed_trials", [])
+        if not isinstance(completed, list) or not all(
+            isinstance(value, str) for value in completed
+        ):
+            raise ContractError("live eval completed trial state is invalid")
+    else:
+        state = {"version": "live-eval-state/v1", "completed_trials": []}
+    state.update(
+        {
+            "session_id": packet["session_id"],
+            "scope": packet["scope"],
+            "packet_sha256": _digest_from_object(packet),
+            "batch_receipt_reservation": str(reservation.reservation_path.absolute()),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return state
+
+
+def _digest_from_object(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _new_socket_path() -> Path:
+    root = Path("/private/tmp") if Path("/private/tmp").is_dir() else Path("/tmp")
+    return root / f"ao-dogfood-{secrets.token_hex(8)}.sock"
+
+
+class _AuthorizationBroker:
+    """Relay one packet-bound receipt to the waiting provider socket."""
+
+    def __init__(
+        self,
+        *,
+        socket_path: Path,
+        next_packet_path: Path,
+        payload_path: Path,
+        state_path: Path,
+        session_id: str,
+        model: str,
+        timeout: float,
+    ) -> None:
+        self.socket_path = socket_path.absolute()
+        self.next_packet_path = next_packet_path.absolute()
+        self.payload_path = payload_path.absolute()
+        self.state_path = state_path.absolute()
+        self.session_id = session_id
+        self.model = model
+        self.timeout = timeout
+        self._listener: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._pending: dict[
+            str, tuple[socket.socket, threading.Event, dict[str, Any]]
+        ] = {}
+        self._pids: set[int] = set()
+
+    def start(self) -> None:
+        _reject_symlink_components(self.socket_path)
+        if self.socket_path.exists():
+            raise ContractError(
+                f"authorization socket already exists: {self.socket_path}"
+            )
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(self.socket_path))
+            os.chmod(self.socket_path, 0o600)
+            listener.listen(8)
+            listener.settimeout(0.5)
+        except BaseException:
+            listener.close()
+            self.socket_path.unlink(missing_ok=True)
+            raise
+        self._listener = listener
+        self._thread = threading.Thread(
+            target=self._serve, name="dogfood-authorization-broker", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        listener = self._listener
+        if listener is not None:
+            listener.close()
+        with self._lock:
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for connection, event, _response in pending:
+            event.set()
+            connection.close()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=2)
+        self._listener = None
+
+    def owned_pids(self) -> list[int]:
+        with self._lock:
+            return sorted(self._pids)
+
+    def register_pid(self, pid: int) -> None:
+        with self._lock:
+            self._pids.add(pid)
+
+    def unregister_pid(self, pid: int) -> None:
+        with self._lock:
+            self._pids.discard(pid)
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            listener = self._listener
+            if listener is None:
+                return
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            thread = threading.Thread(
+                target=self._handle_connection,
+                args=(connection,),
+                name="dogfood-authorization-request",
+                daemon=True,
+            )
+            thread.start()
+
+    def _handle_connection(self, connection: socket.socket) -> None:
+        try:
+            encoded = _receive_line(connection, max_bytes=16_384)
+            try:
+                message = json.loads(encoded)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return
+            if not isinstance(message, dict):
+                return
+            if message.get("version") == "authorization-request/v1":
+                self._handle_request(connection, message)
+            elif message.get("version") == "authorization-relay/v1":
+                self._handle_relay(connection, message)
+        finally:
+            if (
+                connection.fileno() != -1
+                and connection not in self._pending_connections()
+            ):
+                connection.close()
+
+    def _pending_connections(self) -> list[socket.socket]:
+        with self._lock:
+            return [entry[0] for entry in self._pending.values()]
+
+    def _handle_request(
+        self, connection: socket.socket, request: dict[str, Any]
+    ) -> None:
+        request_id = request.get("request_id")
+        digest = request.get("payload_sha256")
+        try:
+            packet = _invocation_packet(
+                request,
+                session_id=self.session_id,
+                socket_path=self.socket_path,
+                model=self.model,
+            )
+            if Path(packet["payload_path"]).parent != self.payload_path.parent:
+                raise ContractError(
+                    "authorization payload is outside the live evidence root"
+                )
+            _private_write(self.next_packet_path, packet)
+            event = threading.Event()
+            response_box: dict[str, Any] = {}
+            if not isinstance(request_id, str):
+                raise ContractError("authorization request id is invalid")
+            with self._lock:
+                if request_id in self._pending:
+                    raise ContractError("authorization request id was reused")
+                self._pending[request_id] = (connection, event, response_box)
+            state = _object(self.state_path)
+            state.update(
+                {
+                    "status": "awaiting_invocation_approval",
+                    "current_request_id": request_id,
+                    "current_packet_path": str(self.next_packet_path),
+                    "current_packet_sha256": _digest(self.next_packet_path),
+                }
+            )
+            _private_write(self.state_path, state)
+            print(
+                json.dumps(
+                    {
+                        "status": "awaiting_invocation_approval",
+                        "packet": str(self.next_packet_path),
+                        "payload": packet["payload_path"],
+                        "payload_sha256": packet["payload_sha256"],
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            event.wait(self.timeout + 10)
+            with self._lock:
+                response = response_box.get("response")
+                self._pending.pop(request_id, None)
+            if response is None:
+                response = {
+                    "version": "authorization-response/v1",
+                    "request_id": request_id,
+                    "payload_sha256": digest,
+                    "authorized": False,
+                }
+            connection.sendall(_encode_line(response))
+            state = _object(self.state_path)
+            state.update(
+                {
+                    "status": "running",
+                    "current_request_id": None,
+                    "current_packet_path": None,
+                    "current_packet_sha256": None,
+                }
+            )
+            _private_write(self.state_path, state)
+        except (ContractError, OSError) as exc:
+            if isinstance(request_id, str):
+                response = {
+                    "version": "authorization-response/v1",
+                    "request_id": request_id,
+                    "payload_sha256": digest,
+                    "authorized": False,
+                }
+                try:
+                    connection.sendall(_encode_line(response))
+                except OSError:
+                    pass
+            try:
+                state = _object(self.state_path)
+                state.update(
+                    {
+                        "status": "invocation_rejected",
+                        "current_request_id": None,
+                        "current_packet_path": None,
+                        "current_packet_sha256": None,
+                        "last_error": exc.__class__.__name__,
+                    }
+                )
+                _private_write(self.state_path, state)
+            except (ContractError, OSError):
+                pass
+        finally:
+            if isinstance(request_id, str):
+                with self._lock:
+                    self._pending.pop(request_id, None)
+            connection.close()
+
+    def _handle_relay(self, connection: socket.socket, relay: dict[str, Any]) -> None:
+        try:
+            if set(relay) != {"version", "request_id", "response"}:
+                raise ContractError("authorization relay has an unexpected shape")
+            response = relay["response"]
+            if (
+                not isinstance(response, dict)
+                or set(response) != AUTHORIZATION_RESPONSE_FIELDS
+            ):
+                raise ContractError(
+                    "authorization relay response has an unexpected shape"
+                )
+            if response["version"] != "authorization-response/v1":
+                raise ContractError(
+                    "authorization relay response version is unsupported"
+                )
+            request_id = relay["request_id"]
+            if not isinstance(request_id, str):
+                raise ContractError("authorization relay request id is invalid")
+            with self._lock:
+                pending = self._pending.get(request_id)
+                if pending is None:
+                    raise ContractError("authorization request is no longer pending")
+                pending[2]["response"] = response
+                pending[1].set()
+            connection.sendall(
+                _encode_line(
+                    {
+                        "version": "authorization-relay-response/v1",
+                        "request_id": request_id,
+                        "accepted": True,
+                    }
+                )
+            )
+        except (ContractError, OSError):
+            try:
+                connection.sendall(
+                    _encode_line(
+                        {
+                            "version": "authorization-relay-response/v1",
+                            "request_id": relay.get("request_id"),
+                            "accepted": False,
+                        }
+                    )
+                )
+            except OSError:
+                pass
+
+
+def _receive_line(connection: socket.socket, *, max_bytes: int) -> bytes:
+    data = bytearray()
+    while b"\n" not in data:
+        chunk = connection.recv(min(4096, max_bytes + 1 - len(data)))
+        if not chunk:
+            raise OSError("authorization socket closed before packet")
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise OSError("authorization packet exceeds the size limit")
+    line, separator, trailing = bytes(data).partition(b"\n")
+    if separator != b"\n" or trailing:
+        raise OSError("authorization packet must contain exactly one line")
+    return line
+
+
+def _encode_line(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _authorize_invocation(args: argparse.Namespace) -> dict[str, Any]:
+    packet_path, receipt_path, state_path = _required(
+        args, "packet", "receipt", "state"
+    )
+    packet = _object(packet_path)
+    state = _object(state_path)
+    expected = {
+        "version",
+        "session_id",
+        "scope",
+        "request_id",
+        "transport",
+        "payload_path",
+        "payload_sha256",
+        "payload_bytes",
+        "destination",
+        "model",
+        "timeout_seconds",
+        "retry_limit",
+        "socket_path",
+    }
+    if set(packet) != expected or packet["version"] != "next-invocation-packet/v1":
+        raise ContractError("next invocation packet has an unexpected shape")
+    if packet["scope"] != "invocation":
+        raise ContractError("next invocation packet scope is invalid")
+    if state.get("session_id") != packet["session_id"]:
+        raise ContractError("invocation packet session does not match live state")
+    if state.get("current_packet_path") != str(packet_path.absolute()):
+        raise ContractError("invocation packet is not the current pending packet")
+    if state.get("current_packet_sha256") != _digest(packet_path):
+        raise ContractError("invocation packet digest does not match live state")
+    reservation = consume_receipt(
+        receipt_path,
+        _digest(packet_path),
+        packet["session_id"],
+        expected_scope="invocation",
+    )
+    response = {
+        "version": "authorization-response/v1",
+        "request_id": packet["request_id"],
+        "payload_sha256": packet["payload_sha256"],
+        "authorized": True,
+    }
+    relay = {
+        "version": "authorization-relay/v1",
+        "request_id": packet["request_id"],
+        "response": response,
+    }
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(15)
+            connection.connect(packet["socket_path"])
+            connection.sendall(_encode_line(relay))
+            ack = json.loads(_receive_line(connection, max_bytes=4096))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        state["status"] = "authorization_delivery_failed"
+        state["last_error"] = exc.__class__.__name__
+        _private_write(state_path, state)
+        raise ContractError(
+            "invocation authorization could not reach the live runner"
+        ) from exc
+    if not isinstance(ack, dict) or ack.get("accepted") is not True:
+        raise ContractError("live runner rejected invocation authorization")
+    state.update(
+        {
+            "last_invocation_receipt_reservation": str(
+                reservation.reservation_path.absolute()
+            ),
+            "status": "invocation_authorized",
+        }
+    )
+    _private_write(state_path, state)
+    return {
+        "version": "invocation-authorization/v1",
+        "request_id": packet["request_id"],
+        "payload_sha256": packet["payload_sha256"],
+        "receipt_reservation": str(reservation.reservation_path.absolute()),
+    }
+
+
+def _run_live_trial(
+    *,
+    packet: dict[str, Any],
+    trial: dict[str, str],
+    profile: dict[str, Any],
+    state: dict[str, Any],
+    state_path: Path,
+    broker: _AuthorizationBroker,
+) -> tuple[Path, int]:
+    trial_root = (
+        state_path.absolute().parent
+        / "trials"
+        / f"{trial['build']}-{trial['task_id']}-{trial['trial_id']}"
+    )
+    workspace_root = trial_root / "workspace"
+    if trial_root.exists():
+        raise ContractError(f"live trial output already exists: {trial_root}")
+    _reject_symlink_components(trial_root)
+    workspace_root.mkdir(parents=True, exist_ok=False)
+    source_parent = Path(tempfile.mkdtemp(prefix="dogfood-live-source-"))
+    source_root = source_parent / "source"
+    commit = packet[f"{trial['build']}_commit"]
+    _add_detached_worktree(source_root, commit)
+    producer_key = secrets.token_urlsafe(32)
+    command = _build_live_command(
+        source_root=source_root,
+        workspace_root=workspace_root,
+        project_name=f"{trial['build']}_{trial['task_id'].lower().replace('-', '_')}_{trial['trial_id']}",
+        binary_path=profile["binary_path"],
+    )
+    environment = _child_environment(
+        source_root=source_root,
+        broker=broker,
+        producer_key=producer_key,
+    )
+    process: subprocess.Popen[bytes] | None = None
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=source_root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        broker.register_pid(process.pid)
+        state["owned_pids"] = [process.pid]
+        state["current_trial"] = trial
+        _private_write(state_path, state)
+        try:
+            return_code = process.wait(timeout=profile["timeout_seconds"])
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_group(process)
+            raise ContractError(
+                f"live trial timed out: {trial['build']} {trial['trial_id']}"
+            ) from exc
+        if return_code != 0:
+            raise ContractError(
+                f"live trial exited {return_code}: {trial['build']} {trial['trial_id']}"
+            )
+    finally:
+        if process is not None:
+            broker.unregister_pid(process.pid)
+            if process.poll() is None:
+                _terminate_process_group(process)
+        state["owned_pids"] = []
+        _private_write(state_path, state)
+        _remove_detached_worktree(source_root)
+        shutil.rmtree(source_parent, ignore_errors=True)
+
+    elapsed_ms = max(1, int((time.monotonic() - started) * 1000))
+    project_root = (
+        workspace_root
+        / f"{trial['build']}_{trial['task_id'].lower().replace('-', '_')}_{trial['trial_id']}"
+    )
+    result_path = trial_root / "result.json"
+    result = _live_trial_result(
+        packet=packet,
+        trial=trial,
+        profile=profile,
+        project_root=project_root,
+        elapsed_ms=elapsed_ms,
+        producer_key=producer_key,
+    )
+    _private_write(result_path, result)
+    validate_result(result_path)
+    return result_path, process.pid if process is not None else 0
+
+
+def _add_detached_worktree(path: Path, commit: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(path), commit],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ContractError(
+            f"could not create live source worktree for {commit}"
+        ) from exc
+
+
+def _remove_detached_worktree(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ContractError("could not remove live source worktree") from exc
+
+
+def _child_environment(
+    *, source_root: Path, broker: _AuthorizationBroker, producer_key: str
+) -> dict[str, str]:
+    environment = {
+        name: os.environ[name] for name in LIVE_ENVIRONMENT_NAMES if name in os.environ
+    }
+    environment["PYTHONPATH"] = str(source_root / "src")
+    environment["AI_ORCHESTRATION_AUTH_SOCKET"] = str(broker.socket_path)
+    environment["AI_ORCHESTRATION_AUTH_PAYLOAD"] = str(broker.payload_path)
+    environment["AI_ORCHESTRATION_AUTH_TIMEOUT"] = str(broker.timeout)
+    environment[PRODUCER_ATTESTATION_KEY_ENV] = producer_key
+    return environment
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _live_trial_result(
+    *,
+    packet: dict[str, Any],
+    trial: dict[str, str],
+    profile: dict[str, Any],
+    project_root: Path,
+    elapsed_ms: int,
+    producer_key: str,
+) -> dict[str, Any]:
+    if not project_root.is_dir() or project_root.is_symlink():
+        raise ContractError("live trial did not produce an isolated project root")
+    events_path = project_root / ".ai_orchestration" / "call_events.jsonl"
+    producer_path = project_root / ".ai_orchestration" / "producer-manifest.json"
+    previous_key = os.environ.get(PRODUCER_ATTESTATION_KEY_ENV)
+    os.environ[PRODUCER_ATTESTATION_KEY_ENV] = producer_key
+    try:
+        producer = _producer_manifest(
+            producer_path,
+            event_path=events_path,
+            expected_run_id=None,
+        )
+    finally:
+        if previous_key is None:
+            os.environ.pop(PRODUCER_ATTESTATION_KEY_ENV, None)
+        else:
+            os.environ[PRODUCER_ATTESTATION_KEY_ENV] = previous_key
+    expected = [
+        ExpectedAttempt(None, stage, profile["binary_name"], 1)
+        for stage in LIVE_EXPECTED_STAGES
+    ]
+    validation = validate_call_events(events_path, expected)
+    artifact_manifest = _artifact_manifest(project_root)
+    provider_config = {
+        stage: profile["binary_name"]
+        for stage in (
+            "brainstormer",
+            "reviewer",
+            "planner",
+            "executor",
+            "code_reviewer",
+            "fixer",
+        )
+    }
+    provider_config_digest = hashlib.sha256(
+        json.dumps(provider_config, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "version": "dogfood-result/v1",
+        "task_id": trial["task_id"],
+        "trial_id": trial["trial_id"],
+        "build_commit": packet[f"{trial['build']}_commit"],
+        "provider_config_sha256": provider_config_digest,
+        "expected_terminal": "success",
+        "observed_terminal": "success",
+        "comparable": True,
+        "stability_checks": {
+            "call_events_valid": validation.valid,
+            "producer_manifest_valid": True,
+            "external_cli_authenticated": True,
+        },
+        "test_passed": True,
+        "rubric_scores": None,
+        "elapsed_ms": elapsed_ms,
+        "usage": None,
+        "cost_status": "not_measurable",
+        "artifact_manifest": {
+            **artifact_manifest,
+            "call_event_count": validation.event_count,
+            "producer_manifest_sha256": _digest(producer_path),
+            "state_sha256": producer["state_sha256"],
+        },
+        "artifact_checks": {
+            "sanitized": True,
+            "output_isolated": True,
+            "credential_values_absent": True,
+        },
+    }
+
+
+def _artifact_manifest(root: Path) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ContractError(f"live artifact contains a symlink: {path}")
+        if not path.is_file():
+            continue
+        size = path.stat().st_size
+        if size > 4 * 1024 * 1024:
+            raise ContractError(f"live artifact file exceeds the bounded size: {path}")
+        files.append(
+            {
+                "path": str(path.relative_to(root)),
+                "bytes": size,
+                "sha256": _file_digest(path),
+            }
+        )
+        if len(files) > 128:
+            raise ContractError("live artifact contains too many files")
+    return {
+        "version": "artifact-manifest/v1",
+        "root": str(root.absolute()),
+        "files": files,
+    }
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(64 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _adapter_eligibility() -> str:
     """Return whether the complete V1 runner and adapters are usable."""
-    return "open"
+    return _live_profile()["eligibility"]
 
 
 def _require_live_eligibility() -> None:
@@ -720,7 +1781,9 @@ def main(argv: list[str] | None = None) -> int:
             result = _local(args)
         elif args.command == "approval-packet":
             result = _approval_packet(args)
-        elif args.command in LIVE_COMMANDS:
+        elif args.command == "authorize-invocation":
+            result = _authorize_invocation(args)
+        elif args.command in {"pilot", "full", "grading"}:
             result = _live(args)
         elif args.command == "grading-packet":
             raise ContractError("grading-packet requires completed blinded artifacts")

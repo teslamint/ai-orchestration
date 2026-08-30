@@ -4,9 +4,11 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +24,10 @@ from ai_orchestration.evals.dogfood import (
     receipt_signature,
     validate_call_events,
     validate_result,
+)
+from ai_orchestration.providers.call_control import (
+    OutboundPayload,
+    SocketAuthorizationGate,
 )
 
 CONTRACT = Path("evals/dogfood/v1")
@@ -1017,3 +1023,149 @@ def test_contract_schema_files_are_strict_and_result_validator_rejects_content(
     path.write_text(json.dumps(result), encoding="utf-8")
     with pytest.raises(ContractError, match="content field"):
         validate_result(path)
+
+
+def test_live_profile_requires_explicit_authenticated_cli(monkeypatch):
+    runner = _load_eval_runner()
+
+    monkeypatch.delenv("AI_ORCHESTRATION_LIVE_BINARY", raising=False)
+    assert runner._live_profile()["eligibility"] == "open"
+
+    monkeypatch.setenv("AI_ORCHESTRATION_LIVE_BINARY", "claude")
+    monkeypatch.setattr(runner, "_cli_auth_status", lambda name, path: True)
+    profile = runner._live_profile()
+
+    assert profile["eligibility"] == "closed"
+    assert profile["binary_name"] == "claude"
+    assert profile["binary_path"]
+    assert profile["model"] == "cli-configured-default"
+
+
+def test_live_command_is_argument_vector_with_bounded_stage_profile(tmp_path):
+    runner = _load_eval_runner()
+
+    command = runner._build_live_command(
+        source_root=tmp_path / "source",
+        workspace_root=tmp_path / "trial",
+        project_name="c1_e_01",
+        binary_path="/opt/homebrew/bin/claude",
+    )
+
+    assert isinstance(command, list)
+    assert all(isinstance(value, str) for value in command)
+    assert "--skip-review" in command
+    assert command[command.index("--workspace") + 1] == str(tmp_path / "trial")
+    for stage in (
+        "brainstormer",
+        "reviewer",
+        "planner",
+        "executor",
+        "code-reviewer",
+        "fixer",
+    ):
+        assert command[command.index(f"--{stage}") + 1] == "claude"
+    assert "shell=True" not in command
+
+
+def test_invocation_packet_is_content_free(tmp_path):
+    runner = _load_eval_runner()
+    payload = b'["claude","--print","secret-prompt-marker"]'
+    payload_path = tmp_path / "payload.bin"
+    payload_path.write_bytes(payload)
+
+    packet = runner._invocation_packet(
+        {
+            "version": "authorization-request/v1",
+            "request_id": "request-1",
+            "transport": "cli_argv",
+            "payload_path": str(payload_path),
+            "payload_sha256": hashlib.sha256(payload).hexdigest(),
+            "destination": None,
+            "timeout_seconds": None,
+            "retry_limit": None,
+        },
+        session_id="session-1",
+        socket_path=tmp_path / "auth.sock",
+    )
+
+    encoded = json.dumps(packet, sort_keys=True)
+    assert "secret-prompt-marker" not in encoded
+    assert packet["version"] == "next-invocation-packet/v1"
+    assert packet["payload_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert packet["scope"] == "invocation"
+
+
+def test_live_authorization_broker_relays_one_packet_bound_receipt(tmp_path):
+    runner = _load_eval_runner()
+    socket_path = runner._new_socket_path()
+    payload_path = tmp_path / "payload.bin"
+    next_packet_path = tmp_path / "next-invocation-packet.json"
+    state_path = tmp_path / "live-eval-state.json"
+    runner._private_write(
+        state_path,
+        {
+            "version": "live-eval-state/v1",
+            "session_id": "session-1",
+            "completed_trials": [],
+        },
+    )
+    broker = runner._AuthorizationBroker(
+        socket_path=socket_path,
+        next_packet_path=next_packet_path,
+        payload_path=payload_path,
+        state_path=state_path,
+        session_id="session-1",
+        model="cli-configured-default",
+        timeout=5,
+    )
+    gate = SocketAuthorizationGate(socket_path, payload_path, timeout=5)
+    broker.start()
+    try:
+        payload = OutboundPayload.for_cli_argv(["claude", "--print", "probe"])
+        errors = []
+
+        def authorize():
+            try:
+                gate.authorize(payload)
+            except Exception as exc:  # pragma: no cover - assertion below reports it
+                errors.append(exc)
+
+        import threading
+
+        thread = threading.Thread(target=authorize)
+        thread.start()
+        for _ in range(100):
+            if next_packet_path.exists():
+                break
+            time.sleep(0.01)
+        assert next_packet_path.exists()
+        issued = datetime.now(timezone.utc)
+        receipt = {
+            "version": "approval-receipt/v1",
+            "nonce": "a" * 32,
+            "issuer": "user",
+            "scope": "invocation",
+            "packet_sha256": hashlib.sha256(next_packet_path.read_bytes()).hexdigest(),
+            "session_id": "session-1",
+            "issued_at": issued.isoformat(),
+            "expires_at": (issued + timedelta(minutes=5)).isoformat(),
+            "consumed_at": None,
+        }
+        receipt["approval_signature"] = receipt_signature(receipt, TEST_APPROVAL_KEY)
+        receipt_path = tmp_path / "invocation-receipt.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        receipt_path.chmod(0o600)
+        authorization = runner._authorize_invocation(
+            SimpleNamespace(
+                packet=str(next_packet_path),
+                receipt=str(receipt_path),
+                state=str(state_path),
+            )
+        )
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert not errors
+        assert authorization["payload_sha256"] == payload.sha256
+        assert not payload_path.exists()
+    finally:
+        broker.stop()
