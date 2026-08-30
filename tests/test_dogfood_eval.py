@@ -1229,6 +1229,15 @@ def test_live_state_clears_stale_error_when_loading_new_batch(tmp_path):
     assert "error_type" not in state
 
 
+def test_live_approval_timeout_is_separate_from_trial_timeout(monkeypatch):
+    runner = _load_eval_runner()
+    monkeypatch.setenv(runner.LIVE_TIMEOUT_ENV, "300")
+    monkeypatch.setenv(runner.LIVE_APPROVAL_TIMEOUT_ENV, "7200")
+
+    assert runner._live_timeout() == 300
+    assert runner._live_approval_timeout() == 7200
+
+
 def test_live_authorization_broker_relays_one_packet_bound_receipt(tmp_path):
     runner = _load_eval_runner()
     socket_path = runner._new_socket_path()

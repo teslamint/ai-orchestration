@@ -39,8 +39,10 @@ LIVE_COMMANDS = {"pilot", "full", "grading", "authorize-invocation"}
 LIVE_BINARY_ENV = "AI_ORCHESTRATION_LIVE_BINARY"
 LIVE_MODEL_ENV = "AI_ORCHESTRATION_LIVE_MODEL"
 LIVE_TIMEOUT_ENV = "AI_ORCHESTRATION_LIVE_TIMEOUT_SECONDS"
+LIVE_APPROVAL_TIMEOUT_ENV = "AI_ORCHESTRATION_LIVE_APPROVAL_TIMEOUT_SECONDS"
 LIVE_BINARY_NAMES = {"agy", "claude", "codex"}
 LIVE_TIMEOUT_SECONDS = 300.0
+LIVE_APPROVAL_TIMEOUT_SECONDS = 7200.0
 LIVE_RETRY_LIMIT = 0
 LIVE_TOKEN_CAP = 4096
 MAX_CHILD_DIAGNOSTIC_BYTES = 512
@@ -462,6 +464,7 @@ def _approval_packet(args: argparse.Namespace) -> dict[str, Any]:
         "limits": {
             "max_routing_invocations_per_trial": len(LIVE_EXPECTED_STAGES),
             "timeout_seconds": profile["timeout_seconds"],
+            "approval_timeout_seconds": profile["approval_timeout_seconds"],
             "retry_limit": LIVE_RETRY_LIMIT,
             "token_cap_per_invocation": LIVE_TOKEN_CAP,
             "cost_status": "not_measurable",
@@ -513,7 +516,9 @@ def _live(args: argparse.Namespace) -> dict[str, Any]:
         state_path=state_path,
         session_id=packet["session_id"],
         model=profile["model"],
-        timeout=profile["timeout_seconds"],
+        timeout=packet["limits"].get(
+            "approval_timeout_seconds", profile["approval_timeout_seconds"]
+        ),
     )
     completed = set(state.get("completed_trials", []))
     try:
@@ -586,12 +591,14 @@ def _live(args: argparse.Namespace) -> dict[str, Any]:
 def _live_profile() -> dict[str, Any]:
     binary_name = os.environ.get(LIVE_BINARY_ENV, "").strip()
     timeout = _live_timeout()
+    approval_timeout = _live_approval_timeout()
     base = {
         "eligibility": "open",
         "binary_name": binary_name or None,
         "binary_path": None,
         "model": os.environ.get(LIVE_MODEL_ENV, "cli-configured-default"),
         "timeout_seconds": timeout,
+        "approval_timeout_seconds": approval_timeout,
         "reason": "explicit authenticated CLI profile is required",
     }
     if not binary_name:
@@ -624,6 +631,19 @@ def _live_timeout() -> float:
         raise ContractError(f"{LIVE_TIMEOUT_ENV} must be numeric") from exc
     if timeout <= 0 or timeout > 1800:
         raise ContractError(f"{LIVE_TIMEOUT_ENV} must be between 0 and 1800 seconds")
+    return timeout
+
+
+def _live_approval_timeout() -> float:
+    raw = os.environ.get(LIVE_APPROVAL_TIMEOUT_ENV, str(LIVE_APPROVAL_TIMEOUT_SECONDS))
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise ContractError(f"{LIVE_APPROVAL_TIMEOUT_ENV} must be numeric") from exc
+    if timeout <= 0 or timeout > 86_400:
+        raise ContractError(
+            f"{LIVE_APPROVAL_TIMEOUT_ENV} must be between 0 and 86400 seconds"
+        )
     return timeout
 
 
@@ -856,6 +876,17 @@ def _approval_packet_object(path: Path) -> dict[str, Any]:
         or payload["authorization_gate"] != "ready"
     ):
         raise ContractError("approval packet is not eligible for live execution")
+    limits = payload["limits"]
+    approval_timeout = (
+        limits.get("approval_timeout_seconds") if isinstance(limits, dict) else None
+    )
+    if approval_timeout is not None and (
+        isinstance(approval_timeout, bool)
+        or not isinstance(approval_timeout, (int, float))
+        or approval_timeout <= 0
+        or approval_timeout > 86_400
+    ):
+        raise ContractError("approval packet approval timeout is invalid")
     if not isinstance(payload["schedule"], list) or payload[
         "schedule"
     ] != _live_schedule(payload["scope"]):
