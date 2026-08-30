@@ -70,6 +70,13 @@ AUTHORIZATION_REQUEST_FIELDS = {
     "timeout_seconds",
     "retry_limit",
 }
+LEGACY_AUTHORIZATION_REQUEST_FIELDS = {
+    "version",
+    "request_id",
+    "transport",
+    "payload_path",
+    "payload_sha256",
+}
 AUTHORIZATION_RESPONSE_FIELDS = {
     "version",
     "request_id",
@@ -695,7 +702,10 @@ def _invocation_packet(
     socket_path: Path,
     model: str = "cli-configured-default",
 ) -> dict[str, Any]:
-    if set(request) != AUTHORIZATION_REQUEST_FIELDS:
+    if set(request) not in (
+        AUTHORIZATION_REQUEST_FIELDS,
+        LEGACY_AUTHORIZATION_REQUEST_FIELDS,
+    ):
         raise ContractError("authorization request has an unexpected shape")
     if request["version"] != "authorization-request/v1":
         raise ContractError("authorization request version is unsupported")
@@ -722,10 +732,10 @@ def _invocation_packet(
         "payload_path": str(payload_path.absolute()),
         "payload_sha256": request["payload_sha256"],
         "payload_bytes": len(payload),
-        "destination": request["destination"],
+        "destination": request.get("destination"),
         "model": model,
-        "timeout_seconds": request["timeout_seconds"],
-        "retry_limit": request["retry_limit"],
+        "timeout_seconds": request.get("timeout_seconds"),
+        "retry_limit": request.get("retry_limit"),
         "socket_path": str(socket_path.absolute()),
     }
 

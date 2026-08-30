@@ -1111,6 +1111,30 @@ def test_invocation_packet_is_content_free(tmp_path):
     assert packet["scope"] == "invocation"
 
 
+def test_invocation_packet_accepts_legacy_gate_request_shape(tmp_path):
+    runner = _load_eval_runner()
+    payload = b'["claude","--print","legacy-probe"]'
+    payload_path = tmp_path / "payload.bin"
+    payload_path.write_bytes(payload)
+
+    packet = runner._invocation_packet(
+        {
+            "version": "authorization-request/v1",
+            "request_id": "request-legacy",
+            "transport": "cli_argv",
+            "payload_path": str(payload_path),
+            "payload_sha256": hashlib.sha256(payload).hexdigest(),
+        },
+        session_id="session-legacy",
+        socket_path=tmp_path / "auth.sock",
+    )
+
+    assert packet["request_id"] == "request-legacy"
+    assert packet["destination"] is None
+    assert packet["timeout_seconds"] is None
+    assert packet["retry_limit"] is None
+
+
 def test_live_authorization_broker_relays_one_packet_bound_receipt(tmp_path):
     runner = _load_eval_runner()
     socket_path = runner._new_socket_path()
