@@ -8,7 +8,12 @@ and "run init" transitions.
 import errno
 import json
 import os
+import signal
+import subprocess
+import sys
+import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -364,6 +369,151 @@ def test_v1_migration_replace_failure_preserves_v1(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "replace", fail_replace)
     with pytest.raises(OSError, match="replace denied"):
+        resolve_run_start(path, resume=True)
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def _kill_during_atomic_replace(path, operation):
+    ready = path.with_name(f"{path.name}.ready")
+    release = path.with_name(f"{path.name}.release")
+    code = """
+from pathlib import Path
+import sys
+import time
+
+from ai_orchestration.engine import state as state_module
+
+path = Path(sys.argv[1])
+operation = sys.argv[2]
+ready = path.with_name(f"{path.name}.ready")
+release = path.with_name(f"{path.name}.release")
+real_replace = state_module.os.replace
+
+def block_replace(source, destination):
+    ready.write_text("ready", encoding="utf-8")
+    while not release.exists():
+        time.sleep(0.01)
+    return real_replace(source, destination)
+
+state_module.os.replace = block_replace
+if operation == "fresh":
+    state_module.save_state(
+        state_module.RunState(
+            goal="fresh",
+            project_name="fresh",
+            config_snapshot={},
+            current_stage="planner",
+        ),
+        path,
+    )
+else:
+    state_module.resolve_run_start(path, resume=True)
+
+"""
+    repo_root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    source_root = str(repo_root / "src")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_root, environment.get("PYTHONPATH")) if part
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", code, str(path), operation],
+        cwd=repo_root,
+        env=environment,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        assert process.returncode == -signal.SIGKILL
+    finally:
+        release.touch()
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+
+def test_fresh_state_kill_before_replace_preserves_no_final_state_and_allows_resume(
+    tmp_path,
+):
+    from ai_orchestration.engine.state import resolve_run_start
+
+    path = tmp_path / "state.json"
+    _kill_during_atomic_replace(path, "fresh")
+
+    assert not path.exists()
+    assert len(list(tmp_path.glob(".state.json.*.tmp"))) == 1
+
+    resumed = resolve_run_start(path, resume=True)
+    assert resumed.schema_version == 2
+    save_state(_make_state(current_stage="brainstormer"), path)
+    assert path.exists()
+
+
+def test_v1_migration_kill_before_replace_preserves_v1_and_allows_resume(tmp_path):
+    from ai_orchestration.engine.state import resolve_run_start
+
+    path = tmp_path / "state.json"
+    original = json.dumps(
+        {
+            "goal": "g",
+            "project_name": "p",
+            "config_snapshot": {},
+            "schema_version": 1,
+        },
+        sort_keys=True,
+    )
+    path.write_text(original, encoding="utf-8")
+
+    _kill_during_atomic_replace(path, "migration")
+
+    assert path.read_text(encoding="utf-8") == original
+    resumed = resolve_run_start(path, resume=True)
+    assert resumed.schema_version == 2
+    assert resumed.run_id
+
+
+def test_fresh_state_keyboard_interrupt_before_replace_leaves_no_final_state(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "state.json"
+
+    def cancel_replace(_source, _destination):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", cancel_replace)
+    with pytest.raises(KeyboardInterrupt):
+        save_state(_make_state(), path)
+
+    assert not path.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_v1_migration_keyboard_interrupt_preserves_v1(tmp_path, monkeypatch):
+    from ai_orchestration.engine.state import resolve_run_start
+
+    path = tmp_path / "state.json"
+    original = json.dumps(
+        {
+            "goal": "g",
+            "project_name": "p",
+            "config_snapshot": {},
+            "schema_version": 1,
+        },
+        sort_keys=True,
+    )
+    path.write_text(original, encoding="utf-8")
+
+    def cancel_replace(_source, _destination):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", cancel_replace)
+    with pytest.raises(KeyboardInterrupt):
         resolve_run_start(path, resume=True)
 
     assert path.read_text(encoding="utf-8") == original
