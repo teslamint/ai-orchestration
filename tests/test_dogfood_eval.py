@@ -757,6 +757,7 @@ def test_collect_and_build_grading_packet_blind_the_matrix(tmp_path, monkeypatch
 
     assert packet["version"] == "grading-packet/v1"
     assert packet["artifact_count"] == 18
+    assert packet["complete_output"] == str(tmp_path / "complete.json")
     assert len(packet["payload"]["artifacts"]) == 18
     assert all(
         set(item) == {"artifact_id", "files", "evidence"}

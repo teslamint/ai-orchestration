@@ -2108,7 +2108,7 @@ def _grading_packet(args: argparse.Namespace) -> dict[str, Any]:
         },
         "environment_names": list(LIVE_ENVIRONMENT_NAMES),
         "output_root": str(state_path.absolute().parent),
-        "complete_output": str(output.absolute().parent.parent / "complete.json"),
+        "complete_output": str(output.absolute().parent / "complete.json"),
         "command": command,
         "command_sha256": hashlib.sha256(
             json.dumps(command, separators=(",", ":")).encode("utf-8")
