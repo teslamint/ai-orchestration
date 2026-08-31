@@ -50,7 +50,8 @@ MAX_CHILD_CAPTURE_BYTES = 64 * 1024
 LIVE_TASK_GOAL = (
     "Create a minimal runnable Python artifact named hello.py that prints exactly "
     "HELLO_DOGFOOD. Use no network, no secrets, and no files outside the assigned "
-    "workspace. Return a concise plan and implement it."
+    "workspace. During executor file-generation steps, return only the requested "
+    "file content. Do not include Markdown fences or explanations."
 )
 LIVE_EXPECTED_STAGES = ("brainstormer", "reviewer", "planner", "executor")
 LIVE_ENVIRONMENT_NAMES = (

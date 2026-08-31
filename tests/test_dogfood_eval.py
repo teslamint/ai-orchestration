@@ -1238,6 +1238,13 @@ def test_live_approval_timeout_is_separate_from_trial_timeout(monkeypatch):
     assert runner._live_approval_timeout() == 7200
 
 
+def test_live_task_goal_does_not_conflict_with_raw_executor_output():
+    runner = _load_eval_runner()
+
+    assert "Return a concise plan and implement it." not in runner.LIVE_TASK_GOAL
+    assert "return only the requested file content." in runner.LIVE_TASK_GOAL
+
+
 def test_live_authorization_broker_relays_one_packet_bound_receipt(tmp_path):
     runner = _load_eval_runner()
     socket_path = runner._new_socket_path()
