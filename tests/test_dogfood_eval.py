@@ -1080,6 +1080,115 @@ def test_cli_local_candidate_fragment_validates_direct_routing_events(tmp_path):
     assert "run_id must be a UUID" in result.stderr
 
 
+def test_cli_local_candidate_fragment_accepts_orchestrator_null_task_id(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    manifest.write_text(
+        json.dumps({"version": "build-manifest/v1", "commit": commit, "dirty": False}),
+        encoding="utf-8",
+    )
+    run_id = "b7e9d7d4-6fd4-4f1c-bb40-0d8b7b3f2b1a"
+    routes = [
+        ("brainstormer", "direct_vendor", "gemini_api"),
+        ("reviewer", "direct_vendor", "anthropic_api"),
+        ("planner", "direct_vendor", "openai_api"),
+        ("executor", "proxy_model", "claude-sonnet-5"),
+    ]
+    event_rows = [
+        {
+            "version": "call-event/v1",
+            "run_id": run_id,
+            "task_id": None,
+            "executor_step_id": None,
+            "stage": stage,
+            "provider_kind": provider_kind,
+            "provider_id": provider_id,
+            "attempt": 1,
+            "prompt_bytes": 20,
+            "estimated_input_tokens": 5,
+            "reported_input_tokens": 11 if provider_kind == "direct_vendor" else None,
+            "reported_output_tokens": 5 if provider_kind == "direct_vendor" else None,
+            "transport_retry_count": None,
+            "latency_ms": 2,
+            "outcome": "success",
+            "error_kind": None,
+        }
+        for stage, provider_kind, provider_id in routes
+    ]
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        "".join(json.dumps(event) + "\n" for event in event_rows), encoding="utf-8"
+    )
+    provider_config = {
+        "brainstormer": "gemini_api",
+        "reviewer": "anthropic_api",
+        "planner": "openai_api",
+        "executor": "claude-sonnet-5",
+        "code_reviewer": "gpt-5.5",
+        "fixer": "claude-sonnet-5",
+    }
+    expected = tmp_path / "expected.json"
+    expected.write_text(
+        json.dumps(
+            {
+                "version": "expected-attempts/v1",
+                "task_id": "C1-R",
+                "trial_id": "01",
+                "run_id": run_id,
+                "provider_config": provider_config,
+                "attempts": [
+                    {
+                        "task_id": "C1-R",
+                        "stage": stage,
+                        "provider_id": provider_id,
+                        "attempt": 1,
+                    }
+                    for stage, _provider_kind, provider_id in routes
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = tmp_path / "run_state.json"
+    state.write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    producer_manifest = tmp_path / "producer-manifest.json"
+    producer_manifest.write_text(
+        json.dumps(_producer_manifest_payload(state, events, run_id)), encoding="utf-8"
+    )
+    producer_manifest.chmod(0o600)
+    output = tmp_path / "candidate-fragment.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_dogfood_eval.py",
+            "local",
+            "--contract",
+            str(CONTRACT),
+            "--build-manifest",
+            str(manifest),
+            "--call-events",
+            str(events),
+            "--expected-attempts",
+            str(expected),
+            "--producer-manifest",
+            str(producer_manifest),
+            "--output",
+            str(output),
+        ],
+        text=True,
+        capture_output=True,
+        env=_eval_env(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    fragment = validate_result(output)
+    assert fragment["task_id"] == "C1-R"
+    assert fragment["trial_id"] == "01"
+    assert fragment["stability_checks"]["call_events_valid"] is True
+
+
 def test_failed_live_trial_never_completes_generation(tmp_path):
     manifest = tmp_path / "manifest.json"
     commit = subprocess.run(

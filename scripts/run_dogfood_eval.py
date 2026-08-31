@@ -2565,6 +2565,18 @@ def _candidate_observation(
         )
     if len(expected) != 4 or len(set(expected)) != 4:
         raise ContractError("expected-attempt manifest requires four unique calls")
+    event_task_ids = [event.get("task_id") for event in events]
+    if any(task_id not in (None, "C1-R") for task_id in event_task_ids):
+        raise ContractError("candidate routing matrix has an invalid task_id")
+    if event_task_ids and any(
+        task_id != event_task_ids[0] for task_id in event_task_ids[1:]
+    ):
+        raise ContractError("candidate routing matrix has mixed task_id values")
+    observed_task_id = event_task_ids[0] if event_task_ids else None
+    validation_expected = [
+        ExpectedAttempt(observed_task_id, item.stage, item.provider_id, item.attempt)
+        for item in expected
+    ]
     current_event_bytes = b"".join(
         json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         + b"\n"
@@ -2573,12 +2585,12 @@ def _candidate_observation(
     with tempfile.TemporaryDirectory(prefix="dogfood-events-") as temporary:
         snapshot_path = Path(temporary) / "call_events.jsonl"
         snapshot_path.write_bytes(current_event_bytes)
-        validation = validate_call_events(snapshot_path, expected)
+        validation = validate_call_events(snapshot_path, validation_expected)
     if validation.event_count != 4:
         raise ContractError("candidate routing matrix must contain exactly four calls")
     if any(
         event.get("run_id") != expected_manifest["run_id"]
-        or event.get("task_id") != "C1-R"
+        or (event.get("task_id") is not None and event.get("task_id") != "C1-R")
         or event.get("outcome") != "success"
         for event in events
     ):
