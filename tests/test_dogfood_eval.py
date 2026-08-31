@@ -601,6 +601,173 @@ def test_cli_local_writes_private_output_and_rejects_symlinked_root(tmp_path):
     assert "symlinked output root" in result.stderr
 
 
+def test_cli_local_supports_each_fixed_local_trial(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    manifest.write_text(
+        json.dumps({"version": "build-manifest/v1", "commit": commit, "dirty": False}),
+        encoding="utf-8",
+    )
+    evidence = tmp_path / "lock-evidence.md"
+    evidence.write_text("forced holder release and clean resumer", encoding="utf-8")
+    output = tmp_path / "c1-l-03.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_dogfood_eval.py",
+            "local",
+            "--contract",
+            str(CONTRACT),
+            "--build-manifest",
+            str(manifest),
+            "--task-id",
+            "C1-L",
+            "--trial-id",
+            "03",
+            "--evidence",
+            str(evidence),
+            "--output",
+            str(output),
+        ],
+        text=True,
+        capture_output=True,
+        env=_eval_env(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    local_result = validate_result(output)
+    assert local_result["task_id"] == "C1-L"
+    assert local_result["trial_id"] == "03"
+    assert local_result["expected_terminal"] == "excluded"
+    assert local_result["observed_terminal"] == "excluded"
+    assert (
+        local_result["artifact_checks"]["evidence_digest"]
+        == hashlib.sha256(evidence.read_bytes()).hexdigest()
+    )
+
+
+def test_grading_packet_rejects_incomplete_blinded_manifest(tmp_path):
+    runner = _load_eval_runner()
+    state = tmp_path / "state.json"
+    runner._private_write(
+        state,
+        {
+            "version": "live-eval-state/v1",
+            "status": "completed",
+            "completed_trials": [],
+            "cleanup": {"socket_removed": True, "payload_absent": True},
+            "owned_pids": [],
+        },
+    )
+    manifest = tmp_path / "blinded.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": "blinded-artifacts/v1",
+                "state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+                "artifacts": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ContractError, match="18 blinded artifacts"):
+        runner._grading_packet(
+            SimpleNamespace(
+                state=str(state),
+                artifact_manifest=str(manifest),
+                output=str(tmp_path / "grading-packet.json"),
+            )
+        )
+
+
+def test_collect_and_build_grading_packet_blind_the_matrix(tmp_path, monkeypatch):
+    runner = _load_eval_runner()
+    result_root = tmp_path / "results"
+    commit = "a" * 40
+    provider_digest = "b" * 64
+    for build in ("baseline", "candidate"):
+        for task_id, expected_terminal in (
+            ("C1-R", "observed"),
+            ("C1-L", "excluded"),
+            ("C1-E", "success"),
+        ):
+            for trial_id in ("01", "02", "03"):
+                result_path = (
+                    result_root / f"{build}-{task_id}-{trial_id}" / "result.json"
+                )
+                runner._private_write(
+                    result_path,
+                    {
+                        "version": "dogfood-result/v1",
+                        "task_id": task_id,
+                        "trial_id": trial_id,
+                        "build_commit": commit,
+                        "provider_config_sha256": provider_digest,
+                        "expected_terminal": expected_terminal,
+                        "observed_terminal": expected_terminal,
+                        "comparable": True,
+                        "stability_checks": {"local_evidence": True},
+                        "test_passed": True,
+                        "rubric_scores": None,
+                        "elapsed_ms": 1,
+                        "usage": None,
+                        "cost_status": "not_measurable",
+                        "artifact_manifest": {},
+                        "artifact_checks": {"sanitized": True},
+                    },
+                )
+    manifest = tmp_path / "blinded-artifacts.json"
+    runner._collect_artifacts(
+        SimpleNamespace(result_root=[str(result_root)], output=str(manifest))
+    )
+    state = tmp_path / "state.json"
+    runner._private_write(
+        state,
+        {
+            "version": "live-eval-state/v1",
+            "status": "completed",
+            "completed_trials": [],
+            "cleanup": {"socket_removed": True, "payload_absent": True},
+            "owned_pids": [],
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "_live_profile",
+        lambda: {
+            "eligibility": "closed",
+            "binary_name": "claude",
+            "binary_path": "/bin/echo",
+            "model": "test-model",
+            "timeout_seconds": 30.0,
+            "approval_timeout_seconds": 60.0,
+        },
+    )
+
+    packet = runner._grading_packet(
+        SimpleNamespace(
+            state=str(state),
+            artifact_manifest=str(manifest),
+            output=str(tmp_path / "grading-packet.json"),
+        )
+    )
+
+    assert packet["version"] == "grading-packet/v1"
+    assert packet["artifact_count"] == 18
+    assert len(packet["payload"]["artifacts"]) == 18
+    assert all(
+        set(item) == {"artifact_id", "files", "evidence"}
+        for item in packet["payload"]["artifacts"]
+    )
+    assert all(
+        "build" not in item and "task_id" not in item
+        for item in packet["payload"]["artifacts"]
+    )
+
+
 def test_cli_local_rejects_unknown_build_commit(tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
