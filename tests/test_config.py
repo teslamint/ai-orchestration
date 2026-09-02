@@ -7,6 +7,7 @@ resolve_workspace_base precedence.
 
 import pytest
 
+import ai_orchestration.config as config_module
 from ai_orchestration.config import (
     DEFAULT_STAGE_TABLE,
     STAGE_NAMES,
@@ -74,6 +75,50 @@ def test_classify_slot_known_binaries(binary):
 @pytest.mark.parametrize("model_id", ["gpt-5.5", "gemini-3.1-pro-low", "opus-5"])
 def test_classify_slot_proxy_model_ids(model_id):
     assert classify_slot(model_id) is SlotKind.PROXY_MODEL
+
+
+@pytest.mark.parametrize("value", ["gemini_api", "openai_api", "anthropic_api"])
+def test_classify_slot_reserved_direct_vendor(value):
+    assert classify_slot(value) is SlotKind.DIRECT_VENDOR
+
+
+def test_select_stage_config_precedes_catalog_validation():
+    stage = config_module.select_stage_config(
+        "planner", cli_value="missing-proxy-model", file_stages={}
+    )
+
+    assert stage == StageConfig(model="missing-proxy-model")
+    with pytest.raises(RoutingError, match="missing-proxy-model"):
+        config_module.validate_stage_config("planner", stage, reachable("gpt-5.5"))
+
+
+def test_requires_catalog_probe_only_when_a_proxy_slot_exists():
+    direct_only = {name: StageConfig(model="openai_api") for name in STAGE_NAMES}
+    mixed = {**direct_only, "planner": StageConfig(model="gpt-5.5")}
+
+    assert config_module.requires_catalog_probe(direct_only) is False
+    assert config_module.requires_catalog_probe(mixed) is True
+
+
+def test_proxy_only_catalog_warns_for_every_reserved_collision():
+    catalog = reachable("gpt-5.5", "openai_api", "anthropic_api")
+
+    with pytest.warns(config_module.ReservedCatalogCollisionWarning) as warning_records:
+        config_module.warn_reserved_catalog_collisions(catalog)
+
+    assert [str(record.message) for record in warning_records] == [
+        "catalog id 'anthropic_api' is reserved for direct-vendor routing",
+        "catalog id 'openai_api' is reserved for direct-vendor routing",
+    ]
+
+
+@pytest.mark.parametrize("primary", ["gpt-5.5", "codex", "openai_api"])
+@pytest.mark.parametrize("fallback", ["gemini_api", "openai_api", "anthropic_api"])
+def test_reserved_fallback_model_is_rejected_for_every_primary_kind(primary, fallback):
+    stage = StageConfig(model=primary, fallback_model=fallback)
+
+    with pytest.raises(ConfigError, match=fallback):
+        config_module.validate_stage_config("planner", stage, UNREACHABLE)
 
 
 # --- resolve_stage_config precedence ------------------------------------------

@@ -8,6 +8,12 @@ and "run init" transitions.
 import errno
 import json
 import os
+import signal
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
 
 import pytest
 
@@ -29,9 +35,10 @@ def _make_state(**overrides) -> RunState:
     return RunState(**defaults)
 
 
-def test_run_state_schema_version_defaults_to_one():
+def test_run_state_schema_version_defaults_to_two_with_uuid():
     state = _make_state()
-    assert state.schema_version == 1
+    assert state.schema_version == 2
+    assert str(uuid.UUID(state.run_id)) == state.run_id
 
 
 def test_save_and_load_round_trips_all_fields(tmp_path):
@@ -187,6 +194,28 @@ def test_load_state_rejects_boolean_schema_version(tmp_path):
         load_state(path)
 
 
+def test_load_state_rejects_unsupported_schema_and_malformed_v2_uuid(tmp_path):
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "schema_version": 3,
+        "run_id": str(uuid.uuid4()),
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError, match="unsupported schema"):
+        load_state(path)
+
+    payload["schema_version"] = 2
+    payload["run_id"] = "not-a-uuid"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StateError, match="run_id"):
+        load_state(path)
+
+
 def test_load_state_rejects_non_object_root(tmp_path):
     from ai_orchestration.errors import StateError
 
@@ -275,6 +304,222 @@ def test_resolve_run_start_resume_with_no_saved_state_starts_fresh(tmp_path):
     assert start.current_stage is None
 
 
+def test_v1_resume_migrates_atomically_and_reuses_one_run_id(tmp_path):
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "completed_stages": ["brainstormer"],
+        "current_stage": "reviewer",
+        "outputs": {},
+        "logs": [],
+        "pause_reason": None,
+        "schema_version": 1,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    from ai_orchestration.engine.state import resolve_run_start
+
+    first = resolve_run_start(path, resume=True)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    second = resolve_run_start(path, resume=True)
+
+    assert first.schema_version == 2
+    assert persisted["schema_version"] == 2
+    assert persisted["run_id"] == first.run_id == second.run_id
+
+
+def test_v1_state_rejects_injected_run_id_before_migration(tmp_path):
+    from ai_orchestration.engine.state import resolve_run_start
+    from ai_orchestration.errors import StateError
+
+    path = tmp_path / "state.json"
+    payload = {
+        "goal": "g",
+        "project_name": "p",
+        "config_snapshot": {},
+        "schema_version": 1,
+        "run_id": "attacker-controlled",
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(StateError, match="v1.*run_id"):
+        resolve_run_start(path, resume=True)
+    assert json.loads(path.read_text(encoding="utf-8")) == payload
+
+
+def test_v1_migration_replace_failure_preserves_v1(tmp_path, monkeypatch):
+    from ai_orchestration.engine.state import resolve_run_start
+
+    path = tmp_path / "state.json"
+    original = json.dumps(
+        {
+            "goal": "g",
+            "project_name": "p",
+            "config_snapshot": {},
+            "schema_version": 1,
+        },
+        sort_keys=True,
+    )
+    path.write_text(original, encoding="utf-8")
+
+    def fail_replace(_source, _destination):
+        raise OSError("replace denied")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace denied"):
+        resolve_run_start(path, resume=True)
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def _kill_during_atomic_replace(path, operation):
+    ready = path.with_name(f"{path.name}.ready")
+    release = path.with_name(f"{path.name}.release")
+    code = """
+from pathlib import Path
+import sys
+import time
+
+from ai_orchestration.engine import state as state_module
+
+path = Path(sys.argv[1])
+operation = sys.argv[2]
+ready = path.with_name(f"{path.name}.ready")
+release = path.with_name(f"{path.name}.release")
+real_replace = state_module.os.replace
+
+def block_replace(source, destination):
+    ready.write_text("ready", encoding="utf-8")
+    while not release.exists():
+        time.sleep(0.01)
+    return real_replace(source, destination)
+
+state_module.os.replace = block_replace
+if operation == "fresh":
+    state_module.save_state(
+        state_module.RunState(
+            goal="fresh",
+            project_name="fresh",
+            config_snapshot={},
+            current_stage="planner",
+        ),
+        path,
+    )
+else:
+    state_module.resolve_run_start(path, resume=True)
+
+"""
+    repo_root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    source_root = str(repo_root / "src")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_root, environment.get("PYTHONPATH")) if part
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", code, str(path), operation],
+        cwd=repo_root,
+        env=environment,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        assert process.returncode == -signal.SIGKILL
+    finally:
+        release.touch()
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+
+def test_fresh_state_kill_before_replace_preserves_no_final_state_and_allows_resume(
+    tmp_path,
+):
+    from ai_orchestration.engine.state import resolve_run_start
+
+    path = tmp_path / "state.json"
+    _kill_during_atomic_replace(path, "fresh")
+
+    assert not path.exists()
+    assert len(list(tmp_path.glob(".state.json.*.tmp"))) == 1
+
+    resumed = resolve_run_start(path, resume=True)
+    assert resumed.schema_version == 2
+    save_state(_make_state(current_stage="brainstormer"), path)
+    assert path.exists()
+
+
+def test_v1_migration_kill_before_replace_preserves_v1_and_allows_resume(tmp_path):
+    from ai_orchestration.engine.state import resolve_run_start
+
+    path = tmp_path / "state.json"
+    original = json.dumps(
+        {
+            "goal": "g",
+            "project_name": "p",
+            "config_snapshot": {},
+            "schema_version": 1,
+        },
+        sort_keys=True,
+    )
+    path.write_text(original, encoding="utf-8")
+
+    _kill_during_atomic_replace(path, "migration")
+
+    assert path.read_text(encoding="utf-8") == original
+    resumed = resolve_run_start(path, resume=True)
+    assert resumed.schema_version == 2
+    assert resumed.run_id
+
+
+def test_fresh_state_keyboard_interrupt_before_replace_leaves_no_final_state(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "state.json"
+
+    def cancel_replace(_source, _destination):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", cancel_replace)
+    with pytest.raises(KeyboardInterrupt):
+        save_state(_make_state(), path)
+
+    assert not path.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_v1_migration_keyboard_interrupt_preserves_v1(tmp_path, monkeypatch):
+    from ai_orchestration.engine.state import resolve_run_start
+
+    path = tmp_path / "state.json"
+    original = json.dumps(
+        {
+            "goal": "g",
+            "project_name": "p",
+            "config_snapshot": {},
+            "schema_version": 1,
+        },
+        sort_keys=True,
+    )
+    path.write_text(original, encoding="utf-8")
+
+    def cancel_replace(_source, _destination):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", cancel_replace)
+    with pytest.raises(KeyboardInterrupt):
+        resolve_run_start(path, resume=True)
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 # --- Two-process resume fixture (integration) -------------------------------
 
 
@@ -309,7 +554,8 @@ def test_state_file_json_is_stable_and_readable(tmp_path):
     save_state(_make_state(current_stage="executor"), path)
     raw = json.loads(path.read_text())
     assert raw["current_stage"] == "executor"
-    assert raw["schema_version"] == 1
+    assert raw["schema_version"] == 2
+    assert str(uuid.UUID(raw["run_id"])) == raw["run_id"]
 
 
 # --- Concurrent-run lock (finding #5) ---------------------------------------

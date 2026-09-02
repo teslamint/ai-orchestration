@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "call-event/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "run_id",
+    "task_id",
+    "executor_step_id",
+    "stage",
+    "provider_kind",
+    "provider_id",
+    "attempt",
+    "prompt_bytes",
+    "estimated_input_tokens",
+    "reported_input_tokens",
+    "reported_output_tokens",
+    "transport_retry_count",
+    "latency_ms",
+    "outcome",
+    "error_kind"
+  ],
+  "properties": {
+    "version": {"const": "call-event/v1"},
+    "run_id": {"type": "string", "format": "uuid"},
+    "task_id": {"type": ["string", "null"]},
+    "executor_step_id": {"type": ["string", "integer", "null"]},
+    "stage": {"enum": ["brainstormer", "reviewer", "planner", "executor", "code_reviewer", "fixer"]},
+    "provider_kind": {"enum": ["proxy_model", "cli_binary", "direct_vendor"]},
+    "provider_id": {"type": "string", "minLength": 1},
+    "attempt": {"type": "integer", "minimum": 1},
+    "prompt_bytes": {"type": "integer", "minimum": 0},
+    "estimated_input_tokens": {"type": "integer", "minimum": 0},
+    "reported_input_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "reported_output_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "transport_retry_count": {"type": ["integer", "null"], "minimum": 0},
+    "latency_ms": {"type": "integer", "minimum": 0},
+    "outcome": {"enum": ["success", "error"]},
+    "error_kind": {"enum": [null, "authentication", "transport", "model", "cli", "provider", "recorder"]}
+  }
+}

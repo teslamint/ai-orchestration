@@ -82,7 +82,11 @@ class Provider(Protocol):
     def complete(self, prompt: str, *, system: str | None = None) -> str: ...
 
     def complete_structured(
-        self, prompt: str, *, schema: type[BaseModel]
+        self,
+        prompt: str,
+        *,
+        schema: type[BaseModel],
+        system: str | None = None,
     ) -> BaseModel: ...
 
     def is_available(self) -> bool: ...

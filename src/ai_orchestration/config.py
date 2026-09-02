@@ -1,15 +1,14 @@
-"""Configuration contracts: per-stage routing, provider endpoint, and workspace anchor.
+"""Configuration contracts: stage selection, routing, and workspace anchoring.
 
-U1 defines slot-kind validation and an injectable ``CatalogStatus`` boundary.
-It never calls the network; ``resolve_stage_config`` is exercised exclusively
-against a caller-supplied ``CatalogStatus``. U3 is the only unit that
-implements ``probe_catalog()`` and performs the real HTTP request.
+Selection is independent from validation. This module never calls the network;
+callers supply one ``CatalogStatus`` only when selected proxy slots require it.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -31,8 +30,11 @@ STAGE_NAMES: tuple[str, ...] = (
     "fixer",
 )
 
-# Exact CLI binary names. Any other slot value is a proxy model id.
+# Exact CLI binary names and reserved direct-vendor literals precede proxy IDs.
 _KNOWN_BINARIES: frozenset[str] = frozenset({"agy", "codex", "claude"})
+DIRECT_VENDOR_VALUES: frozenset[str] = frozenset(
+    {"gemini_api", "openai_api", "anthropic_api"}
+)
 
 
 class SlotKind(str, Enum):
@@ -40,6 +42,11 @@ class SlotKind(str, Enum):
 
     BINARY = "binary"
     PROXY_MODEL = "proxy_model"
+    DIRECT_VENDOR = "direct_vendor"
+
+
+class ReservedCatalogCollisionWarning(UserWarning):
+    """A proxy catalog exposes an ID reserved for direct-vendor routing."""
 
 
 def classify_slot(value: str) -> SlotKind:
@@ -49,11 +56,15 @@ def classify_slot(value: str) -> SlotKind:
     value is treated as a proxy model id. This never guesses: the check is
     membership in the known-binary set, nothing fuzzier.
     """
-    return SlotKind.BINARY if value in _KNOWN_BINARIES else SlotKind.PROXY_MODEL
+    if value in _KNOWN_BINARIES:
+        return SlotKind.BINARY
+    if value in DIRECT_VENDOR_VALUES:
+        return SlotKind.DIRECT_VENDOR
+    return SlotKind.PROXY_MODEL
 
 
 class CatalogOutcome(str, Enum):
-    """Result shape returned by U3's ``probe_catalog()``."""
+    """Result shape returned by the HTTP catalog probe."""
 
     REACHABLE_WITH_MODELS = "reachable_with_models"
     REACHABLE_WITHOUT_ID = "reachable_without_id"
@@ -65,8 +76,8 @@ class CatalogStatus:
     """Injectable catalog-probe result consumed by ``resolve_stage_config``.
 
     ``models`` is only meaningful when ``outcome`` is
-    ``REACHABLE_WITH_MODELS``. U1 never constructs this from a live request;
-    callers (tests today, U3's ``probe_catalog()`` after U3 lands) supply it.
+    ``REACHABLE_WITH_MODELS``. Callers supply either a live probe result or a
+    deterministic test value.
     """
 
     outcome: CatalogOutcome
@@ -158,44 +169,47 @@ def _validate_proxy_slot(
         )
 
 
-def resolve_stage_config(
+def select_stage_config(
     stage_name: str,
     *,
     cli_value: Optional[str] = None,
     file_stages: Optional[Mapping[str, object]] = None,
-    catalog: CatalogStatus,
-    binary_exists: Optional[Callable[[str], bool]] = None,
 ) -> StageConfig:
-    """Resolve one stage's routing and validate every populated slot.
-
-    Precedence, highest first: ``cli_value``, then ``file_stages``, then the
-    built-in default table. Validation runs on the resolved value regardless
-    of its source: a binary-valued slot is checked with ``binary_exists``
-    (PATH lookup, defaulting to ``shutil.which``); a proxy-valued slot is
-    checked against ``catalog``, which is never contacted here.
-    """
+    """Select one stage by precedence without catalog or PATH validation."""
     if stage_name not in STAGE_NAMES:
         raise ConfigError(f"unknown stage: {stage_name!r}")
-
     file_stages = file_stages or {}
-    resolved_binary_exists = binary_exists or _default_binary_exists
-
-    uses_default = cli_value is None and stage_name not in file_stages
     if cli_value is not None:
-        stage = StageConfig.from_raw(cli_value, stage_name=stage_name)
-    elif stage_name in file_stages:
-        stage = StageConfig.from_raw(file_stages[stage_name], stage_name=stage_name)
-    else:
-        stage = DEFAULT_STAGE_TABLE[stage_name]
+        return StageConfig.from_raw(cli_value, stage_name=stage_name)
+    if stage_name in file_stages:
+        return StageConfig.from_raw(file_stages[stage_name], stage_name=stage_name)
+    return DEFAULT_STAGE_TABLE[stage_name]
 
-    if classify_slot(stage.model) is SlotKind.BINARY:
+
+def validate_stage_config(
+    stage_name: str,
+    stage: StageConfig,
+    catalog: CatalogStatus,
+    *,
+    binary_exists: Optional[Callable[[str], bool]] = None,
+    validate_fallback_binary: bool = True,
+) -> None:
+    """Validate one already-selected stage against routing prerequisites."""
+    if stage_name not in STAGE_NAMES:
+        raise ConfigError(f"unknown stage: {stage_name!r}")
+    resolved_binary_exists = binary_exists or _default_binary_exists
+    kind = classify_slot(stage.model)
+    if kind is SlotKind.BINARY:
         _validate_binary_slot(stage_name, "model", stage.model, resolved_binary_exists)
-    else:
+    elif kind is SlotKind.PROXY_MODEL:
         _validate_proxy_slot(stage_name, "model", stage.model, catalog)
 
     if stage.fallback_model is not None:
-        # fallback_model is same-endpoint by definition (§Stage resolution):
-        # always a proxy id, never classified by binary-name pattern.
+        if stage.fallback_model in DIRECT_VENDOR_VALUES:
+            raise ConfigError(
+                f"{stage_name}: fallback_model '{stage.fallback_model}' is reserved "
+                "for a direct-vendor primary and cannot be a proxy fallback"
+            )
         if stage.fallback_model == stage.model:
             raise ConfigError(
                 f"{stage_name}: fallback_model '{stage.fallback_model}' is "
@@ -213,7 +227,7 @@ def resolve_stage_config(
                 f"not a supported CLI binary (must be one of "
                 f"{sorted(_KNOWN_BINARIES)})"
             )
-        if not uses_default:
+        if validate_fallback_binary:
             _validate_binary_slot(
                 stage_name,
                 "fallback_binary",
@@ -221,6 +235,56 @@ def resolve_stage_config(
                 resolved_binary_exists,
             )
 
+
+def requires_catalog_probe(stages: Mapping[str, StageConfig]) -> bool:
+    """Return whether any selected primary or fallback uses the proxy catalog."""
+    return any(
+        classify_slot(stage.model) is SlotKind.PROXY_MODEL
+        or stage.fallback_model is not None
+        for stage in stages.values()
+    )
+
+
+def warn_reserved_catalog_collisions(catalog: CatalogStatus) -> None:
+    """Warn once per proxy catalog ID reserved for direct-vendor routing."""
+    if catalog.outcome is not CatalogOutcome.REACHABLE_WITH_MODELS:
+        return
+    for model_id in sorted(catalog.models & DIRECT_VENDOR_VALUES):
+        warnings.warn(
+            f"catalog id '{model_id}' is reserved for direct-vendor routing",
+            ReservedCatalogCollisionWarning,
+            stacklevel=2,
+        )
+
+
+def resolve_stage_config(
+    stage_name: str,
+    *,
+    cli_value: Optional[str] = None,
+    file_stages: Optional[Mapping[str, object]] = None,
+    catalog: CatalogStatus,
+    binary_exists: Optional[Callable[[str], bool]] = None,
+) -> StageConfig:
+    """Resolve one stage's routing and validate every populated slot.
+
+    Precedence, highest first: ``cli_value``, then ``file_stages``, then the
+    built-in default table. Validation runs on the resolved value regardless
+    of its source: a binary-valued slot is checked with ``binary_exists``
+    (PATH lookup, defaulting to ``shutil.which``); a proxy-valued slot is
+    checked against ``catalog``, which is never contacted here.
+    """
+    file_stages = file_stages or {}
+    uses_default = cli_value is None and stage_name not in file_stages
+    stage = select_stage_config(
+        stage_name, cli_value=cli_value, file_stages=file_stages
+    )
+    validate_stage_config(
+        stage_name,
+        stage,
+        catalog,
+        binary_exists=binary_exists,
+        validate_fallback_binary=not uses_default,
+    )
     return stage
 
 

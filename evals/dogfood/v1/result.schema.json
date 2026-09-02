@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dogfood-result/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "task_id",
+    "trial_id",
+    "build_commit",
+    "provider_config_sha256",
+    "expected_terminal",
+    "observed_terminal",
+    "comparable",
+    "stability_checks",
+    "test_passed",
+    "rubric_scores",
+    "elapsed_ms",
+    "usage",
+    "cost_status",
+    "artifact_manifest",
+    "artifact_checks"
+  ],
+  "properties": {
+    "version": {"const": "dogfood-result/v1"},
+    "task_id": {"enum": ["C1-R", "C1-L", "C1-E"]},
+    "trial_id": {"enum": ["01", "02", "03"]},
+    "build_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "provider_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "expected_terminal": {"type": "string"},
+    "observed_terminal": {"type": "string"},
+    "comparable": {"type": "boolean"},
+    "stability_checks": {"type": "object"},
+    "test_passed": {"type": "boolean"},
+    "rubric_scores": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requirement_coverage", "executable_correctness", "test_quality", "maintainability", "evidence_clarity"],
+          "properties": {
+            "requirement_coverage": {"type": "integer", "minimum": 0, "maximum": 2},
+            "executable_correctness": {"type": "integer", "minimum": 0, "maximum": 2},
+            "test_quality": {"type": "integer", "minimum": 0, "maximum": 2},
+            "maintainability": {"type": "integer", "minimum": 0, "maximum": 2},
+            "evidence_clarity": {"type": "integer", "minimum": 0, "maximum": 2}
+          }
+        }
+      ]
+    },
+    "elapsed_ms": {"type": "integer", "minimum": 0},
+    "usage": {"type": ["object", "null"]},
+    "cost_status": {"enum": ["measured", "not_measurable"]},
+    "artifact_manifest": {"type": "object"},
+    "artifact_checks": {"type": "object"}
+  }
+}

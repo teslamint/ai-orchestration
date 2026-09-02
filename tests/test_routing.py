@@ -7,6 +7,7 @@ back at all.
 """
 
 import json
+import uuid
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from ai_orchestration.providers.base import (
     ModelFaultError,
     TransportError,
 )
+from ai_orchestration.providers.call_events import CallRecorder
 from ai_orchestration.providers.http import HttpProvider, probe_catalog
 from ai_orchestration.providers.routing import (
     complete_structured_with_fallback,
@@ -91,6 +93,26 @@ def test_resolve_provider_chain_proxy_model_returns_http_provider():
     assert provider.model == "gpt-5.5"
 
 
+@pytest.mark.parametrize("reserved", ["gemini_api", "openai_api", "anthropic_api"])
+def test_reserved_primary_never_constructs_http_provider(reserved):
+    direct_calls = []
+
+    def direct_factory(tool_type):
+        direct_calls.append(getattr(tool_type, "value", tool_type))
+        return _StubHttp(reserved, ["direct"])
+
+    provider = resolve_provider_chain(
+        StageConfig(model=reserved),
+        catalog=CatalogStatus(outcome=CatalogOutcome.UNREACHABLE),
+        base_url="http://stub/v1",
+        api_key="k",
+        direct_provider_factory=direct_factory,
+    )
+
+    assert direct_calls == [reserved]
+    assert not isinstance(provider, HttpProvider)
+
+
 # --- complete_with_fallback: routing decisions ------------------------------
 
 
@@ -127,6 +149,102 @@ class _StubHttp:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("reserved", ["gemini_api", "openai_api", "anthropic_api"])
+def test_reserved_primary_uses_direct_vendor_factory_for_both_paths(
+    structured, reserved
+):
+    direct_calls = []
+
+    def direct_factory(tool_type):
+        direct_calls.append(getattr(tool_type, "value", tool_type))
+        output = _Plan(step_id=7) if structured else "direct output"
+        return _StubHttp(reserved, [output])
+
+    kwargs = {
+        "http_provider_factory": lambda model: pytest.fail(
+            f"reserved primary reached HttpProvider factory: {model}"
+        ),
+        "cli_provider_factory": lambda binary: pytest.fail(
+            f"reserved primary reached CLI factory: {binary}"
+        ),
+        "direct_provider_factory": direct_factory,
+    }
+    if structured:
+        result, provider_used = complete_structured_with_fallback(
+            StageConfig(model=reserved),
+            "prompt",
+            schema=_Plan,
+            **kwargs,
+        )
+        assert result == _Plan(step_id=7)
+    else:
+        result, provider_used = complete_with_fallback(
+            StageConfig(model=reserved), "prompt", **kwargs
+        )
+        assert result == "direct output"
+
+    assert provider_used == reserved
+    assert direct_calls == [reserved]
+
+
+@pytest.mark.parametrize("error", [AuthenticationError("401"), ModelFaultError("429")])
+@pytest.mark.parametrize("reserved", ["gemini_api", "openai_api", "anthropic_api"])
+def test_direct_authentication_and_model_faults_are_terminal(error, reserved):
+    cli_calls = []
+
+    with pytest.raises(type(error)):
+        complete_with_fallback(
+            StageConfig(model=reserved, fallback_binary="codex"),
+            "prompt",
+            http_provider_factory=lambda model: pytest.fail(
+                f"reserved primary reached HttpProvider factory: {model}"
+            ),
+            cli_provider_factory=lambda binary: cli_calls.append(binary),
+            direct_provider_factory=lambda _tool_type: _StubHttp(reserved, [error]),
+        )
+
+    assert cli_calls == []
+
+
+@pytest.mark.parametrize("reserved", ["gemini_api", "openai_api", "anthropic_api"])
+def test_direct_transport_uses_binary_with_attempt_ordinals_one_then_two(
+    tmp_path, reserved
+):
+    recorder = CallRecorder(tmp_path / "events.jsonl", run_id=str(uuid.uuid4()))
+
+    result, provider_used = complete_with_fallback(
+        StageConfig(model=reserved, fallback_binary="codex"),
+        "prompt",
+        http_provider_factory=lambda model: pytest.fail(
+            f"reserved primary reached HttpProvider factory: {model}"
+        ),
+        cli_provider_factory=lambda binary: _StubCLI(binary, output="fallback"),
+        direct_provider_factory=lambda _tool_type: _StubHttp(
+            reserved, [TransportError("timeout")]
+        ),
+        recorder=recorder,
+        stage_name="planner",
+    )
+
+    assert (result, provider_used) == ("fallback", "codex")
+    events = recorder.read_events()
+    assert [
+        (
+            event.stage,
+            event.provider_kind,
+            event.provider_id,
+            event.attempt,
+            event.outcome,
+            event.error_kind,
+        )
+        for event in events
+    ] == [
+        ("planner", "direct_vendor", reserved, 1, "error", "transport"),
+        ("planner", "cli_binary", "codex", 2, "success", None),
+    ]
 
 
 def test_complete_with_fallback_endpoint_unreachable_skips_fallback_model_uses_binary():

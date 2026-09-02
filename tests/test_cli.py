@@ -73,6 +73,72 @@ def _fake_cli_factory(binary):
     return _FakeProvider(binary)
 
 
+def _install_direct_fakes(monkeypatch):
+    def direct_factory(tool_type):
+        return _FakeProvider(getattr(tool_type, "value", tool_type))
+
+    monkeypatch.setattr(cli_module, "_direct_vendor_provider_factory", direct_factory)
+    monkeypatch.setattr(
+        cli_module,
+        "validate_direct_vendor",
+        lambda *_args, **_kwargs: None,
+    )
+
+
+def test_direct_vendor_factory_forwards_exact_tool_type_and_active_gate(monkeypatch):
+    from ai_orchestration.providers.base import ToolType
+
+    gate = object()
+    sentinel = object()
+    observed = []
+
+    def create(tool_type, **kwargs):
+        observed.append((tool_type, kwargs))
+        return sentinel
+
+    monkeypatch.delenv(cli_module._FAKE_PROVIDERS_ENV_VAR, raising=False)
+    monkeypatch.setattr(cli_module, "_active_authorization_gate", gate)
+    monkeypatch.setattr(cli_module, "create_direct_vendor_provider", create)
+
+    result = cli_module._direct_vendor_provider_factory(ToolType.ANTHROPIC_API)
+
+    assert result is sentinel
+    assert observed == [(ToolType.ANTHROPIC_API, {"authorization_gate": gate})]
+
+
+def test_test_control_requires_exact_fake_mode_before_use(tmp_path, monkeypatch):
+    from ai_orchestration.errors import ConfigError
+
+    tmp_path.chmod(0o700)
+    monkeypatch.setenv(cli_module._FAKE_PROVIDERS_ENV_VAR, "0")
+    monkeypatch.setenv(cli_module._TEST_CONTROL_DIR_ENV_VAR, str(tmp_path))
+
+    with pytest.raises(ConfigError, match="requires"):
+        cli_module._test_control_dir()
+
+
+def test_test_planner_barrier_rejects_symlinked_release(tmp_path, monkeypatch):
+    from ai_orchestration.errors import StateError
+
+    tmp_path.chmod(0o700)
+    target = tmp_path / "target"
+    target.touch()
+    (tmp_path / "holder.release").symlink_to(target)
+    monkeypatch.setenv(cli_module._FAKE_PROVIDERS_ENV_VAR, "1")
+    monkeypatch.setenv(cli_module._TEST_CONTROL_DIR_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(cli_module._TEST_ROLE_ENV_VAR, "holder")
+
+    with pytest.raises(StateError, match="release marker"):
+        cli_module._wait_at_test_planner_barrier("planner")
+
+
+def _stage_flags(value_by_stage):
+    flags = []
+    for stage_name, value in value_by_stage.items():
+        flags.extend(["--" + stage_name.replace("_", "-"), value])
+    return flags
+
+
 def test_fixer_extracts_fenced_code_before_writing(tmp_path, monkeypatch):
     from ai_orchestration.config import StageConfig
     from ai_orchestration.models.context import (
@@ -142,6 +208,208 @@ def test_command_logs_are_created_inside_project_workspace(tmp_path, monkeypatch
 def _install_fakes(monkeypatch):
     monkeypatch.setattr(cli_module, "_http_provider_factory", _fake_http_factory)
     monkeypatch.setattr(cli_module, "_cli_provider_factory", _fake_cli_factory)
+
+
+def test_direct_only_startup_skips_catalog_probe(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _install_direct_fakes(monkeypatch)
+    probe_calls = []
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_catalog_for_startup",
+        lambda *args: probe_calls.append(args),
+    )
+    values = {
+        name: ("gemini_api", "openai_api", "anthropic_api")[index % 3]
+        for index, name in enumerate(
+            [
+                "brainstormer",
+                "reviewer",
+                "planner",
+                "executor",
+                "code_reviewer",
+                "fixer",
+            ]
+        )
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "direct only",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "direct_only",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--skip-review",
+            *_stage_flags(values),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert probe_calls == []
+
+
+def test_mixed_startup_probes_catalog_once_and_warns_on_reserved_collision(
+    tmp_path, monkeypatch
+):
+    from ai_orchestration.config import CatalogOutcome, CatalogStatus
+
+    _install_fakes(monkeypatch)
+    _install_direct_fakes(monkeypatch)
+    probe_calls = []
+
+    def probe(*args):
+        probe_calls.append(args)
+        return CatalogStatus(
+            outcome=CatalogOutcome.REACHABLE_WITH_MODELS,
+            models=frozenset({"gpt-5.5", "openai_api"}),
+        )
+
+    monkeypatch.setattr(cli_module, "_probe_catalog_for_startup", probe)
+    values = {name: "openai_api" for name in cli_module._STAGE_FLAG_NAMES}
+    values["planner"] = "gpt-5.5"
+
+    with pytest.warns(Warning, match="openai_api"):
+        result = runner.invoke(
+            app,
+            [
+                "mixed",
+                "--workspace",
+                str(tmp_path),
+                "--project-name",
+                "mixed",
+                "--auto-select",
+                "--auto-run",
+                "--auto-approve",
+                "--skip-review",
+                *_stage_flags(values),
+            ],
+        )
+
+    assert result.exit_code == 0, result.stdout
+    assert len(probe_calls) == 1
+
+
+@pytest.mark.parametrize("primary", ["gpt-5.5", "codex", "openai_api"])
+@pytest.mark.parametrize("fallback", ["gemini_api", "openai_api", "anthropic_api"])
+def test_reserved_fallback_is_rejected_before_probe_for_all_primary_kinds(
+    tmp_path, monkeypatch, primary, fallback
+):
+    import ai_orchestration.config as config_module
+
+    _install_fakes(monkeypatch)
+    _install_direct_fakes(monkeypatch)
+    monkeypatch.setattr(config_module, "_default_binary_exists", lambda _name: True)
+    probe_calls = []
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_catalog_for_startup",
+        lambda *args: probe_calls.append(args),
+    )
+    config_path = tmp_path / f"{primary}-{fallback}.json"
+    config_path.write_text(
+        json.dumps({"planner": {"model": primary, "fallback_model": fallback}}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["goal", "--workspace", str(tmp_path), "--tool-config", str(config_path)],
+    )
+
+    assert result.exit_code != 0
+    assert fallback in result.stdout
+    assert probe_calls == []
+
+
+def test_fresh_v2_state_is_persisted_before_first_provider_call(tmp_path, monkeypatch):
+    state_path = tmp_path / "persist_first" / ".ai_orchestration" / "run_state.json"
+    observed_run_ids = []
+
+    class StateObservingProvider(_FakeProvider):
+        def complete(self, prompt: str, *, system=None, **kwargs) -> str:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            assert payload["schema_version"] == 2
+            observed_run_ids.append(payload["run_id"])
+            return super().complete(prompt, system=system, **kwargs)
+
+    monkeypatch.setattr(
+        cli_module,
+        "_http_provider_factory",
+        lambda model: StateObservingProvider(model),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_cli_provider_factory",
+        lambda binary: StateObservingProvider(binary),
+    )
+    _install_reachable_catalog(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "persist before provider",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "persist_first",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--skip-review",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    final = json.loads(state_path.read_text(encoding="utf-8"))
+    assert observed_run_ids
+    assert set(observed_run_ids) == {final["run_id"]}
+    from ai_orchestration.providers.call_events import read_call_events
+
+    events = read_call_events(state_path.with_name("call_events.jsonl"))
+    assert events
+    assert {event.run_id for event in events} == {final["run_id"]}
+    assert {event.stage for event in events}.issuperset(
+        {"brainstormer", "reviewer", "planner", "executor"}
+    )
+
+
+def test_fresh_rerun_replaces_the_current_call_event_stream(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _install_reachable_catalog(monkeypatch)
+    arguments = [
+        "repeat candidate",
+        "--workspace",
+        str(tmp_path),
+        "--project-name",
+        "fresh_rerun_events",
+        "--auto-select",
+        "--auto-run",
+        "--auto-approve",
+        "--skip-review",
+    ]
+
+    first = runner.invoke(app, arguments)
+    second = runner.invoke(app, arguments)
+
+    assert first.exit_code == 0, first.stdout
+    assert second.exit_code == 0, second.stdout
+    state_path = (
+        tmp_path / "fresh_rerun_events" / ".ai_orchestration" / "run_state.json"
+    )
+    final = json.loads(state_path.read_text(encoding="utf-8"))
+    from ai_orchestration.providers.call_events import read_call_events
+
+    events = read_call_events(state_path.with_name("call_events.jsonl"))
+    assert len(events) == 8
+    assert len({event.run_id for event in events}) == 2
+    current_events = [event for event in events if event.run_id == final["run_id"]]
+    assert len(current_events) == 4
+    assert {event.run_id for event in current_events} == {final["run_id"]}
 
 
 # --- happy: --help lists every preserved option -----------------------------
@@ -568,9 +836,10 @@ def test_custom_provider_endpoint_reaches_real_http_provider_factory(monkeypatch
     captured = {}
 
     class _SpyHttpProvider:
-        def __init__(self, *, model, base_url, api_key):
+        def __init__(self, *, model, base_url, api_key, authorization_gate):
             captured["base_url"] = base_url
             captured["api_key"] = api_key
+            captured["authorization_gate"] = authorization_gate
             self.model = model
 
         def complete(self, prompt, **kwargs):
@@ -593,6 +862,7 @@ def test_custom_provider_endpoint_reaches_real_http_provider_factory(monkeypatch
     provider = cli_module._http_provider_factory("gpt-5.5")
     assert captured["base_url"] == "http://custom-endpoint:1234/v1"
     assert captured["api_key"] == "custom-key"
+    assert captured["authorization_gate"] is cli_module._active_authorization_gate
     assert isinstance(provider, _SpyHttpProvider)
 
 
