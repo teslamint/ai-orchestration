@@ -2,7 +2,8 @@
 schema: plan/v1
 title: Stabilize Legacy API Routing and Live Run Locking
 type: feat
-status: approved
+status: done
+completed_by: 0de811f320f98ff038cf06d0c2b17ac6e4d7047d
 date: 2026-08-28
 execution: code
 origin: docs/specs/2026-08-28-stabilize-routing-locking-design.md

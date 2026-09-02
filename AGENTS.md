@@ -153,6 +153,8 @@ ai-orchestration "<goal>" \
 - **Issue**: Korean/special characters in goal cause path issues
 - **Solution**: `generate_project_name()` in `src/ai_orchestration/utils/slug.py` creates ASCII-only slugs
 
+Reusable workflow solutions are stored under `docs/solutions/`; the relevant category is part of release and evidence investigations.
+
 ## Commit & Pull Request Guidelines
 - Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`
 - Use short, imperative commit subjects (e.g., "Add command validation")
