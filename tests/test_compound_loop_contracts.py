@@ -240,6 +240,20 @@ def test_stage_markers_are_sequential_and_resume_to_the_next_stage():
         next_transition(completed.state, "stage-start:fixer")
 
 
+def test_ledger_round_trip_preserves_body_text(tmp_path):
+    path = tmp_path / ".release-loop" / "progress.md"
+    body = "\n# User notes\n\nDo not discard this text.\n"
+    state = ReleaseLoopState("implement", "in-progress")
+    save_ledger(state, path)
+    path.write_text(path.read_text(encoding="utf-8") + body, encoding="utf-8")
+
+    loaded = load_ledger(path)
+    assert loaded is not None
+    save_ledger(loaded, path)
+
+    assert path.read_text(encoding="utf-8").endswith(body)
+
+
 def test_ledger_round_trip_is_atomic_and_preserves_previous_bytes(
     tmp_path, monkeypatch
 ):
@@ -413,3 +427,115 @@ def test_cli_opt_in_rejects_missing_source_before_release_ledger_write(tmp_path)
     assert not (
         tmp_path / "compound_missing" / ".release-loop" / "progress.md"
     ).exists()
+
+
+def test_cli_resume_requires_existing_run_state_for_existing_ledger(
+    tmp_path, monkeypatch
+):
+    from typer.testing import CliRunner
+
+    import ai_orchestration.cli as cli_module
+    from ai_orchestration.config import CatalogOutcome, CatalogStatus
+
+    root, contents = _make_source(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, root, contents)
+    project = tmp_path / "compound_resume"
+    ledger_path = project / ".release-loop" / "progress.md"
+    save_ledger(ReleaseLoopState("implement", "in-progress"), ledger_path)
+    monkeypatch.setattr(
+        cli_module, "_http_provider_factory", lambda model: _CliProvider()
+    )
+    monkeypatch.setattr(
+        cli_module, "_cli_provider_factory", lambda binary: _CliProvider()
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_catalog_for_startup",
+        lambda *args, **kwargs: CatalogStatus(
+            outcome=CatalogOutcome.REACHABLE_WITH_MODELS,
+            models=frozenset({"gemini-3.1-pro-low", "gpt-5.5", "claude-sonnet-5"}),
+        ),
+    )
+    monkeypatch.setattr(cli_module, "_is_tty", lambda: False)
+
+    result = CliRunner().invoke(
+        cli_module.app,
+        [
+            "build hello",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "compound_resume",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--skip-review",
+            "--resume",
+            "--compound-loop-path",
+            str(root),
+            "--compound-loop-manifest",
+            str(manifest),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "existing release-loop ledger requires --resume" in result.stdout
+
+
+def test_cli_zero_fix_iterations_marks_review_stage_optional(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    import ai_orchestration.cli as cli_module
+    from ai_orchestration.config import CatalogOutcome, CatalogStatus
+
+    root, contents = _make_source(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, root, contents)
+    plan = tmp_path / "plan.md"
+    _sealed_plan(plan)
+    monkeypatch.setattr(
+        cli_module, "_http_provider_factory", lambda model: _CliProvider()
+    )
+    monkeypatch.setattr(
+        cli_module, "_cli_provider_factory", lambda binary: _CliProvider()
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_probe_catalog_for_startup",
+        lambda *args, **kwargs: CatalogStatus(
+            outcome=CatalogOutcome.REACHABLE_WITH_MODELS,
+            models=frozenset({"gemini-3.1-pro-low", "gpt-5.5", "claude-sonnet-5"}),
+        ),
+    )
+    monkeypatch.setattr(cli_module, "_is_tty", lambda: False)
+
+    result = CliRunner().invoke(
+        cli_module.app,
+        [
+            "build hello",
+            "--workspace",
+            str(tmp_path),
+            "--project-name",
+            "compound_zero_fixes",
+            "--auto-select",
+            "--auto-run",
+            "--auto-approve",
+            "--max-fix-iterations",
+            "0",
+            "--compound-loop-path",
+            str(root),
+            "--compound-loop-manifest",
+            str(manifest),
+            "--compound-loop-plan",
+            str(plan),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    state = load_ledger(
+        tmp_path / "compound_zero_fixes" / ".release-loop" / "progress.md"
+    )
+    assert state is not None
+    assert "code_reviewer" in state.completed_stages
+    assert "fixer" in state.completed_stages

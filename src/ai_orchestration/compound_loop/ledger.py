@@ -50,6 +50,11 @@ class ReleaseLoopState:
     resume_phase: Optional[str] = None
     resume_phase_status: Optional[str] = None
     schema: str = LEDGER_SCHEMA
+    body: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.body, str):
+            raise LedgerError("ledger body must be text")
 
     @property
     def next_stage(self) -> Optional[str]:
@@ -265,7 +270,7 @@ def _parse_ledger(text: str) -> ReleaseLoopState:
     except TypeError as exc:
         raise LedgerError("ledger fields have invalid types") from exc
     _validate_state(state)
-    return state
+    return replace(state, body=parts[2])
 
 
 def load_ledger(path: Path) -> Optional[ReleaseLoopState]:
@@ -303,7 +308,7 @@ def _serialize_ledger(state: ReleaseLoopState) -> str:
             "",
         ]
     )
-    return "\n".join(lines)
+    return "\n".join(lines) + state.body
 
 
 def save_ledger(state: ReleaseLoopState, path: Path) -> None:

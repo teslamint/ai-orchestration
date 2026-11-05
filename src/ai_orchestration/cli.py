@@ -1046,7 +1046,7 @@ def _run(
             config.compound_loop_manifest,
             config.workspace_path / ".release-loop" / "progress.md",
             plan_path=config.compound_loop_plan,
-            resume=resume,
+            resume=resuming_existing,
         )
     elif (
         config.compound_loop_manifest is not None
@@ -1292,6 +1292,11 @@ def _run(
                 select_items=_select,
             )
             if compound_adapter is not None:
+                if (
+                    compound_adapter.next_stage == "code_reviewer"
+                    and compound_adapter.state.current_stage is None
+                ):
+                    compound_adapter.complete_optional_stage("code_reviewer")
                 compound_adapter.complete_optional_stage("fixer")
 
         _gated_run_stage("review_fix", _run_review_fix)
