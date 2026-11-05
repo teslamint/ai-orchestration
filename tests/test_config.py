@@ -114,7 +114,10 @@ def test_proxy_only_catalog_warns_for_every_reserved_collision():
 
 @pytest.mark.parametrize("primary", ["gpt-5.5", "codex", "openai_api"])
 @pytest.mark.parametrize("fallback", ["gemini_api", "openai_api", "anthropic_api"])
-def test_reserved_fallback_model_is_rejected_for_every_primary_kind(primary, fallback):
+def test_reserved_fallback_model_is_rejected_for_every_primary_kind(
+    primary, fallback, monkeypatch
+):
+    monkeypatch.setattr(config_module, "_default_binary_exists", lambda binary: True)
     stage = StageConfig(model=primary, fallback_model=fallback)
 
     with pytest.raises(ConfigError, match=fallback):

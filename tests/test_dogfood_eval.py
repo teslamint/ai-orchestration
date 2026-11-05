@@ -781,6 +781,36 @@ def test_collect_and_build_grading_packet_blind_the_matrix(tmp_path, monkeypatch
 
 
 def test_cli_local_rejects_unknown_build_commit(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", str(repository)], check=True, capture_output=True)
+    for name, contents in (("first.txt", "first"), ("second.txt", "second")):
+        (repository / name).write_text(contents, encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repository), "add", "-A"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--no-verify",
+                "-m",
+                f"add {name}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
@@ -791,10 +821,10 @@ def test_cli_local_rejects_unknown_build_commit(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/run_dogfood_eval.py",
+            str(Path(__file__).parents[1] / "scripts" / "run_dogfood_eval.py"),
             "local",
             "--contract",
-            str(CONTRACT),
+            str(CONTRACT.resolve()),
             "--build-manifest",
             str(manifest),
             "--output",
@@ -803,12 +833,16 @@ def test_cli_local_rejects_unknown_build_commit(tmp_path):
         text=True,
         capture_output=True,
         env=_eval_env(),
+        cwd=repository,
     )
     assert result.returncode == 1
     assert "commit" in result.stderr
 
     parent_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD^"], check=True, capture_output=True, text=True
+        ["git", "-C", str(repository), "rev-parse", "HEAD^"],
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     manifest.write_text(
         json.dumps(
@@ -823,10 +857,10 @@ def test_cli_local_rejects_unknown_build_commit(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/run_dogfood_eval.py",
+            str(Path(__file__).parents[1] / "scripts" / "run_dogfood_eval.py"),
             "local",
             "--contract",
-            str(CONTRACT),
+            str(CONTRACT.resolve()),
             "--build-manifest",
             str(manifest),
             "--output",
@@ -835,6 +869,7 @@ def test_cli_local_rejects_unknown_build_commit(tmp_path):
         text=True,
         capture_output=True,
         env=_eval_env(),
+        cwd=repository,
     )
     assert result.returncode == 1
     assert "HEAD" in result.stderr
@@ -1313,19 +1348,30 @@ def test_contract_schema_files_are_strict_and_result_validator_rejects_content(
         validate_result(path)
 
 
-def test_live_profile_requires_explicit_authenticated_cli(monkeypatch):
+def test_live_profile_requires_explicit_authenticated_cli(monkeypatch, tmp_path):
     runner = _load_eval_runner()
 
     monkeypatch.delenv("AI_ORCHESTRATION_LIVE_BINARY", raising=False)
     assert runner._live_profile()["eligibility"] == "open"
 
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "auth" ] && [ "$2" = "status" ]; then\n'
+        "  printf '{\"loggedIn\":true}\\n'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("AI_ORCHESTRATION_LIVE_BINARY", "claude")
-    monkeypatch.setattr(runner, "_cli_auth_status", lambda name, path: True)
     profile = runner._live_profile()
 
     assert profile["eligibility"] == "closed"
     assert profile["binary_name"] == "claude"
-    assert profile["binary_path"]
+    assert profile["binary_path"] == str(fake_claude)
     assert profile["model"] == "cli-configured-default"
 
 
