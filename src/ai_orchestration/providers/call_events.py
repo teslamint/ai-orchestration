@@ -437,6 +437,20 @@ def _decode_rows(content: bytes, path: Path) -> list[CallEvent]:
     return events
 
 
+def read_call_events_snapshot(path: Path) -> tuple[bytes, list[CallEvent]]:
+    """Read and decode one event-stream snapshot while holding a shared lock."""
+    path = Path(path)
+    lock_path = path.with_name(f".{path.name}.lock")
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_SH)
+        content = path.read_bytes()
+        return content, _decode_rows(content, path)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def read_call_events(path: Path) -> list[CallEvent]:
     """Read a stable snapshot and fail closed on any malformed or partial row."""
     path = Path(path)
