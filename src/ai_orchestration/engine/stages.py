@@ -251,7 +251,9 @@ class CommandExecutor:
                 )
                 try:
                     stdout, stderr = process.communicate(timeout=self.timeout)
-                except subprocess.TimeoutExpired:
+                except BaseException:
+                    # Own session: Ctrl-C never reaches the child, so every
+                    # exit from communicate (not only timeout) kills the group.
                     _kill_process_group(process)
                     raise
                 duration_ms = int((time.monotonic() - start_time) * 1000)

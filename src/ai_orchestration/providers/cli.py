@@ -149,72 +149,80 @@ def _run_cli_subprocess(
         except subprocess.TimeoutExpired:
             pass
 
-    while sel.get_map():
-        if timeout is not None and time.monotonic() - start > timeout:
-            _kill_process_group()
-            raise CLIProviderError(f"{binary_name}: exceeded timeout of {timeout}s")
+    # The child has its own session, so a terminal Ctrl-C never reaches it:
+    # any exit from the read loop (not only a timeout) must kill its group.
+    try:
+        while sel.get_map():
+            if timeout is not None and time.monotonic() - start > timeout:
+                _kill_process_group()
+                raise CLIProviderError(f"{binary_name}: exceeded timeout of {timeout}s")
+            remaining = (
+                None
+                if timeout is None
+                else max(0.0, timeout - (time.monotonic() - start))
+            )
+            events = sel.select(
+                timeout=min(heartbeat_interval, 1.0, remaining)
+                if remaining is not None
+                else min(heartbeat_interval, 1.0)
+            )
+            if not events:
+                now = time.monotonic()
+                if now - last_output >= heartbeat_interval and (
+                    now - last_heartbeat >= heartbeat_interval
+                ):
+                    if on_heartbeat is not None:
+                        on_heartbeat()
+                    last_heartbeat = now
+                if process.poll() is not None and not sel.get_map():
+                    break
+                continue
+            for key, _ in events:
+                stream = key.fileobj
+                raw_chunk = os.read(stream.fileno(), 65536)
+                stream_name = key.data
+                text_chunk = stream_decoders[stream_name].decode(
+                    raw_chunk, final=not raw_chunk
+                )
+                if not raw_chunk:
+                    if text_chunk:
+                        if stream_name == "stderr":
+                            stderr_chunks.append(text_chunk)
+                        else:
+                            merged_output.append(text_chunk)
+                            if parse_stream_json:
+                                stdout_buffer += text_chunk
+                    if parse_stream_json and stream_name == "stdout" and stdout_buffer:
+                        parsed_chunks.extend(_extract_stream_json_text(stdout_buffer))
+                    sel.unregister(stream)
+                    continue
+                if stream_name == "stderr":
+                    stderr_chunks.append(text_chunk)
+                    continue
+                merged_output.append(text_chunk)
+                last_output = time.monotonic()
+                if parse_stream_json:
+                    stdout_buffer += text_chunk
+                    lines = stdout_buffer.splitlines(keepends=True)
+                    stdout_buffer = ""
+                    if lines and not lines[-1].endswith(("\n", "\r")):
+                        stdout_buffer = lines.pop()
+                    for line in lines:
+                        parsed_chunks.extend(_extract_stream_json_text(line))
+
         remaining = (
             None if timeout is None else max(0.0, timeout - (time.monotonic() - start))
         )
-        events = sel.select(
-            timeout=min(heartbeat_interval, 1.0, remaining)
-            if remaining is not None
-            else min(heartbeat_interval, 1.0)
-        )
-        if not events:
-            now = time.monotonic()
-            if now - last_output >= heartbeat_interval and (
-                now - last_heartbeat >= heartbeat_interval
-            ):
-                if on_heartbeat is not None:
-                    on_heartbeat()
-                last_heartbeat = now
-            if process.poll() is not None and not sel.get_map():
-                break
-            continue
-        for key, _ in events:
-            stream = key.fileobj
-            raw_chunk = os.read(stream.fileno(), 65536)
-            stream_name = key.data
-            text_chunk = stream_decoders[stream_name].decode(
-                raw_chunk, final=not raw_chunk
-            )
-            if not raw_chunk:
-                if text_chunk:
-                    if stream_name == "stderr":
-                        stderr_chunks.append(text_chunk)
-                    else:
-                        merged_output.append(text_chunk)
-                        if parse_stream_json:
-                            stdout_buffer += text_chunk
-                if parse_stream_json and stream_name == "stdout" and stdout_buffer:
-                    parsed_chunks.extend(_extract_stream_json_text(stdout_buffer))
-                sel.unregister(stream)
-                continue
-            if stream_name == "stderr":
-                stderr_chunks.append(text_chunk)
-                continue
-            merged_output.append(text_chunk)
-            last_output = time.monotonic()
-            if parse_stream_json:
-                stdout_buffer += text_chunk
-                lines = stdout_buffer.splitlines(keepends=True)
-                stdout_buffer = ""
-                if lines and not lines[-1].endswith(("\n", "\r")):
-                    stdout_buffer = lines.pop()
-                for line in lines:
-                    parsed_chunks.extend(_extract_stream_json_text(line))
-
-    remaining = (
-        None if timeout is None else max(0.0, timeout - (time.monotonic() - start))
-    )
-    try:
-        returncode = process.wait(timeout=remaining)
-    except subprocess.TimeoutExpired as exc:
+        try:
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_group()
+            raise CLIProviderError(
+                f"{binary_name}: exceeded timeout of {timeout}s"
+            ) from exc
+    except BaseException:
         _kill_process_group()
-        raise CLIProviderError(
-            f"{binary_name}: exceeded timeout of {timeout}s"
-        ) from exc
+        raise
     stderr_text = "".join(stderr_chunks)
     combined = "".join(merged_output)
 

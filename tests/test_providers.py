@@ -1128,3 +1128,46 @@ def test_run_cli_subprocess_preserves_utf8_across_read_chunks():
         )
         == "한"
     )
+
+
+def test_run_cli_subprocess_kills_process_group_on_non_timeout_exception(tmp_path):
+    # The child runs in its own session, so a terminal Ctrl-C never reaches
+    # it. Any exception leaving the runner (not only a timeout) must still
+    # kill the whole group, or the child outlives the orchestrator.
+    import os
+    import sys
+    import time
+
+    from ai_orchestration.providers.cli import _run_cli_subprocess
+
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import os, time\n"
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_cli_subprocess(
+            [sys.executable, "-c", script],
+            binary_name="python",
+            timeout=30,
+            heartbeat_interval=0.05,
+            on_heartbeat=interrupt,
+        )
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 2
+    alive = True
+    while alive and time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            alive = False
+        else:
+            time.sleep(0.05)
+    if alive:
+        os.kill(pid, 9)
+    assert not alive, "child survived an exception raised by the runner"

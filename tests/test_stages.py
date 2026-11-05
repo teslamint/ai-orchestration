@@ -362,3 +362,40 @@ def test_command_executor_timeout_kills_entire_process_group(tmp_path):
         "descendant process kept writing after the timeout kill: "
         "the process group was not terminated"
     )
+
+
+def test_command_executor_kills_process_group_on_non_timeout_exception(
+    tmp_path, monkeypatch
+):
+    # The command runs in its own session, so Ctrl-C in the terminal never
+    # reaches it. An exception other than a timeout must still kill the
+    # group, or the command outlives the orchestrator.
+    import os
+    import subprocess
+    import time
+
+    started = []
+
+    def _interrupt(self, *args, **kwargs):
+        started.append(self.pid)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", _interrupt)
+    executor = CommandExecutor(
+        auto_approve=True, log_directory=tmp_path, retries=0, timeout=30
+    )
+    with pytest.raises(KeyboardInterrupt):
+        executor.run("sleep 60")
+    pid = started[0]
+    deadline = time.monotonic() + 2
+    alive = True
+    while alive and time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            alive = False
+        else:
+            time.sleep(0.05)
+    if alive:
+        os.killpg(pid, 9)
+    assert not alive, "command survived an exception raised during communicate"
