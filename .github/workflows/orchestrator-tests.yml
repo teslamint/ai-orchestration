@@ -28,6 +28,13 @@ jobs:
       - name: Check formatting
         run: uv run ruff format --check .
 
+      - name: Check out pinned compound-loop contract source
+        run: |
+          commit=$(python3 -c 'import json; print(json.load(open("tests/fixtures/compound_loop/manifest.json"))["source_commit"])')
+          git clone --filter=blob:none --no-checkout https://github.com/teslamint/compound-loop.git "$RUNNER_TEMP/compound-loop"
+          git -C "$RUNNER_TEMP/compound-loop" checkout --detach "$commit"
+          echo "COMPOUND_LOOP_SOURCE=$RUNNER_TEMP/compound-loop" >> "$GITHUB_ENV"
+
       - name: Run tests
         run: uv run pytest -v
 

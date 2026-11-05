@@ -356,3 +356,6 @@ class OrchestratorConfig:
     ralph_wiggum_max_iterations: int = 3
     ralph_wiggum_completion_promise: Optional[str] = None
     ralph_wiggum_state_file: bool = True
+    compound_loop_path: Optional[Path] = None
+    compound_loop_manifest: Optional[Path] = None
+    compound_loop_plan: Optional[Path] = None
