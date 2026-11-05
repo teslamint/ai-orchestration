@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--compound-loop-path`, `--compound-loop-manifest`, and `--compound-loop-plan` validate a pinned compound-loop checkout and record gated release-loop phase transitions in `.release-loop/progress.md`. The adapter never pushes, merges, publishes, or archives, preserves ledger text outside its frontmatter, and fails closed on an incompatible source or an unresumable ledger (#4).
 - `scripts/supervise_orchestration.py` runs independent orchestration runs concurrently from a `supervision-plan/v1` file. Each run gets its own workspace, log, and manifest row; children get no stdin; concurrency defaults to `min(4, runs)`; a failed or cancelled run never stops healthy siblings; exit codes are 0, 1, 2 (pre-dispatch only), and 130 (#6).
 
+### Changed
+- Minimum supported Python is now 3.11; Python 3.10 is end of life, and this clears the `filelock` Dependabot alerts. No issue number exists.
+
 ### Fixed
 - CLI provider calls and `run_command` tasks no longer leave their child process running when the orchestrator exits for any reason other than a timeout, such as Ctrl-C. Children run in their own session, so the terminal never signalled them; the whole process group is now killed on every exit path. No issue or PR number exists for this fix yet.
 - Declared `httpx` as a direct dependency. `providers/http.py` imports it, but it was only installed transitively through `openai` 2.x, so `openai` 3.x left it missing.

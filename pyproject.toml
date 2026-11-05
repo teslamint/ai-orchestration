@@ -7,7 +7,7 @@ name = "ai-orchestration"
 version = "0.5.0a0"
 description = "6-stage AI orchestration tool: proxy-first multi-model routing with CLI fallback"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.12.5",
     "rich>=14.2.0",
@@ -37,7 +37,7 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 exclude = ["workspace", ".venv", "docs/specs"]
 
 [tool.ruff.lint]

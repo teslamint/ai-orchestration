@@ -3,7 +3,7 @@
 [![Orchestration Tests](https://github.com/teslamint/ai-orchestration/actions/workflows/orchestrator-tests.yml/badge.svg)](https://github.com/teslamint/ai-orchestration/actions/workflows/orchestrator-tests.yml)
 [![GitHub release](https://img.shields.io/github/v/release/teslamint/ai-orchestration?include_prereleases)](https://github.com/teslamint/ai-orchestration/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 6단계 워크플로우로 사용자의 목표를 브레인스토밍부터 코드 리뷰/수정까지 자동화하는 로컬 CLI 오케스트레이터입니다.
 모델은 프록시(CLIProxyAPI) 우선으로 라우팅되며, 엔드포인트가 닿지 않을 때는 `agy`/`codex`/`claude` CLI

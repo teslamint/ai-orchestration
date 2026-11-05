@@ -5,9 +5,8 @@ These tests assert the pyproject.toml contract that later units rely on,
 not runtime CLI behavior.
 """
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 import ai_orchestration
 
@@ -19,9 +18,9 @@ def test_package_exposes_version():
     assert ai_orchestration.__version__
 
 
-def test_pyproject_declares_python_310_floor():
+def test_pyproject_declares_python_311_floor():
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    assert data["project"]["requires-python"] == ">=3.10"
+    assert data["project"]["requires-python"] == ">=3.11"
 
 
 def test_pyproject_declares_console_script():
@@ -36,9 +35,9 @@ def test_pyproject_declares_openai_dependency():
     assert any(dep.startswith("openai") for dep in deps)
 
 
-def test_ruff_target_version_is_py310():
+def test_ruff_target_version_is_py311():
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    assert data["tool"]["ruff"]["target-version"] == "py310"
+    assert data["tool"]["ruff"]["target-version"] == "py311"
 
 
 def test_package_discovery_declares_a_build_backend():
