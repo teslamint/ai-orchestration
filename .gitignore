@@ -20,3 +20,13 @@ execution_logs/
 
 # Devcontainer secrets
 .devcontainer/.env
+
+# Local secrets
+.env
+.envrc
+
+# Local agent tooling and release-loop state
+.claude/
+.codex/
+.entirecontext/
+.release-loop/
