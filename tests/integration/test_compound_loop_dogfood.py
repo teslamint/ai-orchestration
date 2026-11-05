@@ -6,16 +6,22 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "test-compound-loop-contracts.sh"
-COMPOUND_LOOP_SOURCE = Path(
-    os.environ.get("COMPOUND_LOOP_SOURCE", "/Users/teslamint/workspace/compound-loop")
-)
 
 
 def test_c3_ct_matrix_and_nine_run_gate():
+    # The gate needs a compound-loop checkout at the manifest's pinned commit.
+    # CI provides one; locally an absent source skips rather than guessing a path.
+    source = os.environ.get("COMPOUND_LOOP_SOURCE")
+    if not source:
+        if os.environ.get("CI"):
+            pytest.fail("CI must set COMPOUND_LOOP_SOURCE for the C3-CT gate")
+        pytest.skip("set COMPOUND_LOOP_SOURCE to a compound-loop checkout")
     env = dict(os.environ)
-    env["COMPOUND_LOOP_SOURCE"] = str(COMPOUND_LOOP_SOURCE)
+    env["COMPOUND_LOOP_SOURCE"] = source
     result = subprocess.run(
         ["bash", str(SCRIPT), "dogfood"],
         cwd=REPO_ROOT,
