@@ -13,6 +13,7 @@ dependencies = [
     "rich>=14.2.0",
     "typer>=0.21.1",
     "openai>=1.82.0",
+    "httpx>=0.27.0",
 ]
 
 [project.scripts]
@@ -37,7 +38,7 @@ where = ["src"]
 [tool.ruff]
 line-length = 88
 target-version = "py310"
-exclude = ["workspace", ".venv"]
+exclude = ["workspace", ".venv", "docs/specs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - CLI provider calls and `run_command` tasks no longer leave their child process running when the orchestrator exits for any reason other than a timeout, such as Ctrl-C. Children run in their own session, so the terminal never signalled them; the whole process group is now killed on every exit path. No issue or PR number exists for this fix yet.
+- Declared `httpx` as a direct dependency. `providers/http.py` imports it, but it was only installed transitively through `openai` 2.x, so `openai` 3.x left it missing.
+- Upgraded locked dependencies to clear the open Dependabot alerts, including `pyasn1`, `urllib3`, `certifi`, `anyio`, `virtualenv`, and `protobuf`. This supersedes the `pyasn1` bump in PR #1. Ruff now skips `docs/specs/`, because its newer markdown formatting would rewrite approved historical specs.
 
 ### Documented
 - Added `docs/solutions/workflow-issues/review-introduced-state-machine-deviation.md`, the deviation-addendum process the Cycle 1 plan references (#3).
