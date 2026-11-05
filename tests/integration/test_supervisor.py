@@ -11,11 +11,14 @@ import time
 from pathlib import Path
 
 import pytest
+
 from ai_orchestration.supervisor import (
     RunSpec,
     SupervisionPlan,
     run_supervised,
 )
+
+
 def _wait_for_path(path: Path, timeout: float = 10.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -23,8 +26,6 @@ def _wait_for_path(path: Path, timeout: float = 10.0) -> bool:
             return True
         time.sleep(0.02)
     return path.exists()
-
-
 
 
 def _timed_command(run_id: str, outcome: str, delay: float = 0.15) -> tuple[str, ...]:
@@ -246,6 +247,7 @@ def test_supervisor_keyboard_interrupt_cancels_running_child_group(tmp_path):
         "time.sleep(30)"
     )
     run = RunSpec("interrupt", _python_command(code), tmp_path / "workspace")
+
     def interrupt_after_child_starts():
         if _wait_for_path(pid_path):
             os.kill(os.getpid(), signal.SIGINT)
@@ -292,6 +294,7 @@ def test_terminate_process_group_kills_grandchild_after_leader_exits(tmp_path):
     while time.monotonic() < deadline and not marker.exists():
         time.sleep(0.02)
     assert not marker.exists()
+
 
 @pytest.mark.parametrize("cancel", [False, True])
 def test_supervisor_kills_grandchild_before_return(tmp_path, cancel):

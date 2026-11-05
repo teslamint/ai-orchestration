@@ -22,6 +22,8 @@ from ai_orchestration.supervisor import (
 
 def _command(code: str) -> tuple[str, ...]:
     return (sys.executable, "-c", code)
+
+
 def _wait_for_path(path: Path, timeout: float = 10.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -447,10 +449,10 @@ def test_failed_child_with_429_output_is_not_rate_limited(tmp_path):
     )
 
     assert manifest.result_for(run.run_id).status == "failed"
+
+
 def test_library_default_concurrency_adapts_to_run_count(tmp_path):
-    plan = SupervisionPlan(
-        (RunSpec("one", _command("pass"), tmp_path / "one"),)
-    )
+    plan = SupervisionPlan((RunSpec("one", _command("pass"), tmp_path / "one"),))
 
     validate_plan(plan)
 
@@ -478,9 +480,8 @@ def test_post_dispatch_manifest_failure_does_not_cancel_siblings(tmp_path, monke
 
     def fail_terminal_write(path, payload):
         nonlocal failed_once
-        if (
-            not failed_once
-            and any(row["status"] == "failed" for row in payload["runs"])
+        if not failed_once and any(
+            row["status"] == "failed" for row in payload["runs"]
         ):
             failed_once = True
             raise OSError("manifest unavailable")
@@ -496,6 +497,8 @@ def test_post_dispatch_manifest_failure_does_not_cancel_siblings(tmp_path, monke
 
     assert failed_once
     assert (healthy.workspace / "completed").exists()
+
+
 def test_cli_reports_post_dispatch_persistence_failure_as_run_error(
     tmp_path, monkeypatch, capsys
 ):
@@ -548,6 +551,8 @@ def test_output_root_overlap_check_is_case_insensitive(tmp_path, monkeypatch):
 
     with pytest.raises(SupervisionValidationError, match="overlaps output root"):
         run_supervised(SupervisionPlan((run,)), output_root)
+
+
 def test_worker_exception_row_uses_resolved_workspace_and_can_resume(
     tmp_path, monkeypatch
 ):
