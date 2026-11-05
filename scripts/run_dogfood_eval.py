@@ -150,6 +150,10 @@ def _parser() -> argparse.ArgumentParser:
 
     grading_packet = commands.add_parser("grading-packet")
     _add(grading_packet, "--state", "--artifact-manifest", "--output")
+    grading_packet.add_argument(
+        "--complete-output",
+        help="write the grading report here (default: complete.json beside --output)",
+    )
 
     collect = commands.add_parser("collect-artifacts")
     collect.add_argument("--result-root", action="append", required=True)
@@ -2108,7 +2112,12 @@ def _grading_packet(args: argparse.Namespace) -> dict[str, Any]:
         },
         "environment_names": list(LIVE_ENVIRONMENT_NAMES),
         "output_root": str(state_path.absolute().parent),
-        "complete_output": str(output.absolute().parent / "complete.json"),
+        "complete_output": str(
+            Path(
+                getattr(args, "complete_output", None)
+                or output.absolute().parent / "complete.json"
+            ).absolute()
+        ),
         "command": command,
         "command_sha256": hashlib.sha256(
             json.dumps(command, separators=(",", ":")).encode("utf-8")

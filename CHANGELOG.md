@@ -6,8 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `scripts/run_dogfood_eval.py grading-packet --complete-output` writes the grading report to a caller-chosen path, so a retry directory can still publish the plan's canonical `evidence/V1/complete.json` (#3).
+
 ### Fixed
 - CLI provider calls and `run_command` tasks no longer leave their child process running when the orchestrator exits for any reason other than a timeout, such as Ctrl-C. Children run in their own session, so the terminal never signalled them; the whole process group is now killed on every exit path. No issue or PR number exists for this fix yet.
+
+### Documented
+- Added `docs/solutions/workflow-issues/review-introduced-state-machine-deviation.md`, the deviation-addendum process the Cycle 1 plan references (#3).
 
 ## [0.4.0a0] - 2025-01-12
 

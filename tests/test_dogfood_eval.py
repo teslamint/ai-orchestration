@@ -758,6 +758,17 @@ def test_collect_and_build_grading_packet_blind_the_matrix(tmp_path, monkeypatch
     assert packet["version"] == "grading-packet/v1"
     assert packet["artifact_count"] == 18
     assert packet["complete_output"] == str(tmp_path / "complete.json")
+
+    canonical = tmp_path / "evidence" / "V1" / "complete.json"
+    attempt_packet = runner._grading_packet(
+        SimpleNamespace(
+            state=str(state),
+            artifact_manifest=str(manifest),
+            output=str(tmp_path / "attempt-2" / "grading-packet.json"),
+            complete_output=str(canonical),
+        )
+    )
+    assert attempt_packet["complete_output"] == str(canonical)
     assert len(packet["payload"]["artifacts"]) == 18
     assert all(
         set(item) == {"artifact_id", "files", "evidence"}

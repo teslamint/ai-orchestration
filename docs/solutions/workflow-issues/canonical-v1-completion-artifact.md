@@ -48,7 +48,7 @@ Before V1 acceptance, verify all of these conditions:
 4. The report binds to the current candidate and grading packet.
 5. Stability, usability, latency, cleanup, and redaction checks pass.
 
-If the runner uses an attempt-specific path, materialize the canonical report as a byte-identical artifact. Record both paths and one digest in the release evidence.
+If the runner uses an attempt-specific path, pass the plan path to `grading-packet --complete-output <canonical path>`. The grading command then writes its report there directly, so no manual copy is needed. Without the flag the report lands beside `--output`. When a report already exists elsewhere, materialize the canonical report as a byte-identical artifact. Record both paths and one digest in the release evidence.
 
 When V2 changes an archived `progress.md`, update the exact `progress.md` entry in `.archive-source-manifest.json`. Recompute that manifest's SHA-256. Update the matching `.owned[".archive-source-manifest.json"]` value in `.phase-artifact-ownership.json`. Rerun the archive verifier with the archived progress path and the same destination. Require `state: archived` and `moved: []`.
 
