@@ -270,7 +270,12 @@ def _parse_ledger(text: str) -> ReleaseLoopState:
     except TypeError as exc:
         raise LedgerError("ledger fields have invalid types") from exc
     _validate_state(state)
-    return replace(state, body=parts[2])
+    # The newline after the closing delimiter belongs to the frontmatter
+    # separator; keep only text after it as the state body.
+    body = parts[2]
+    if body.startswith("\n"):
+        body = body[1:]
+    return replace(state, body=body)
 
 
 def load_ledger(path: Path) -> Optional[ReleaseLoopState]:

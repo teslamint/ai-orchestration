@@ -247,10 +247,13 @@ def test_ledger_round_trip_preserves_body_text(tmp_path):
     save_ledger(state, path)
     path.write_text(path.read_text(encoding="utf-8") + body, encoding="utf-8")
 
+    previous = path.read_bytes()
     loaded = load_ledger(path)
+    assert loaded == ReleaseLoopState("implement", "in-progress", body=body)
     assert loaded is not None
     save_ledger(loaded, path)
 
+    assert path.read_bytes() == previous
     assert path.read_text(encoding="utf-8").endswith(body)
 
 
