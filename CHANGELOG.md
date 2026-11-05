@@ -9,12 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - `scripts/run_dogfood_eval.py grading-packet --complete-output` writes the grading report to a caller-chosen path, so a retry directory can still publish the plan's canonical `evidence/V1/complete.json` (#3).
 - `scripts/measure_prompt_payloads.py` writes a deterministic report that ranks recorded `call-event/v1` prompt payloads by stage and model, without prompt content. The cycle decision is `no-migration` for stage message types (#5).
+- `--compound-loop-path`, `--compound-loop-manifest`, and `--compound-loop-plan` validate a pinned compound-loop checkout and record gated release-loop phase transitions in `.release-loop/progress.md`. The adapter never pushes, merges, publishes, or archives, preserves ledger text outside its frontmatter, and fails closed on an incompatible source or an unresumable ledger (#4).
 
 ### Fixed
 - CLI provider calls and `run_command` tasks no longer leave their child process running when the orchestrator exits for any reason other than a timeout, such as Ctrl-C. Children run in their own session, so the terminal never signalled them; the whole process group is now killed on every exit path. No issue or PR number exists for this fix yet.
 - Declared `httpx` as a direct dependency. `providers/http.py` imports it, but it was only installed transitively through `openai` 2.x, so `openai` 3.x left it missing.
 - Upgraded locked dependencies to clear the open Dependabot alerts, including `pyasn1`, `urllib3`, `certifi`, `anyio`, `virtualenv`, and `protobuf`. This supersedes the `pyasn1` bump in PR #1. Ruff now skips `docs/specs/`, because its newer markdown formatting would rewrite approved historical specs.
-- Embedded release-loop ledgers now round-trip an empty body without adding a newline and preserve body text exactly. (#4)
 
 ### Documented
 - Added `docs/solutions/workflow-issues/review-introduced-state-machine-deviation.md`, the deviation-addendum process the Cycle 1 plan references (#3).
