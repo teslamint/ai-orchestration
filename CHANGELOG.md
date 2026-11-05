@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - `scripts/run_dogfood_eval.py grading-packet --complete-output` writes the grading report to a caller-chosen path, so a retry directory can still publish the plan's canonical `evidence/V1/complete.json` (#3).
+- `scripts/measure_prompt_payloads.py` writes a deterministic report that ranks recorded `call-event/v1` prompt payloads by stage and model, without prompt content. The cycle decision is `no-migration` for stage message types (#5).
 
 ### Fixed
 - CLI provider calls and `run_command` tasks no longer leave their child process running when the orchestrator exits for any reason other than a timeout, such as Ctrl-C. Children run in their own session, so the terminal never signalled them; the whole process group is now killed on every exit path. No issue or PR number exists for this fix yet.
