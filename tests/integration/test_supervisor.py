@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -192,3 +195,76 @@ def test_supervisor_dogfood_30_instances_and_concurrent_throughput(tmp_path):
         (run.workspace / "identity").read_text() == run.run_id
         for run in concurrent_plan.runs
     )
+
+
+def test_supervisor_children_receive_devnull_stdin(tmp_path, monkeypatch):
+    from ai_orchestration import supervisor
+
+    original_popen = subprocess.Popen
+    seen = []
+
+    def recording_popen(*args, **kwargs):
+        seen.append(kwargs.get("stdin"))
+        return original_popen(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", recording_popen)
+    run = RunSpec("stdin", _python_command("pass"), tmp_path / "workspace")
+
+    run_supervised(
+        SupervisionPlan((run,), max_concurrency=1),
+        tmp_path / "results",
+    )
+
+    assert seen == [subprocess.DEVNULL]
+
+
+def test_supervisor_keyboard_interrupt_cancels_running_child_group(tmp_path):
+    pid_path = tmp_path / "workspace" / "child.pid"
+    code = (
+        "import os, pathlib, time; "
+        "pathlib.Path('child.pid').write_text(str(os.getpid())); "
+        "time.sleep(30)"
+    )
+    run = RunSpec("interrupt", _python_command(code), tmp_path / "workspace")
+    timer = threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT))
+    timer.daemon = True
+    timer.start()
+
+    try:
+        run_supervised(
+            SupervisionPlan((run,), max_concurrency=1),
+            tmp_path / "results",
+        )
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("KeyboardInterrupt must propagate")
+
+    child_pid = int(pid_path.read_text())
+    try:
+        os.kill(child_pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("child process survived run cancellation")
+
+
+def test_terminate_process_group_kills_grandchild_after_leader_exits(tmp_path):
+    from ai_orchestration.supervisor import _terminate_process_group
+
+    marker = tmp_path / "grandchild-survived"
+    code = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', "
+        f'"import signal, time, pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+        f"time.sleep(1); pathlib.Path('{marker}').touch()\"] )"
+    )
+    process = subprocess.Popen(
+        _python_command(code),
+        start_new_session=True,
+    )
+    process.wait(timeout=3)
+    _terminate_process_group(process, process.pid)
+    time.sleep(1.2)
+
+    assert not marker.exists()

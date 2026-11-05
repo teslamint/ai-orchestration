@@ -182,9 +182,10 @@ def validate_plan(plan: SupervisionPlan) -> None:
             raise SupervisionValidationError(
                 "run_id must be a safe non-empty identifier"
             )
-        if run.run_id in identities:
+        identity = run.run_id.casefold()
+        if identity in identities:
             raise SupervisionValidationError("run_id values must be unique")
-        identities.add(run.run_id)
+        identities.add(identity)
         if (
             run._command_was_scalar
             or not run.command
@@ -210,7 +211,8 @@ def validate_plan(plan: SupervisionPlan) -> None:
                 f"workspace for {run.run_id} must be a directory"
             )
         _reject_symlink_components(workspace, label="workspace")
-        normalized = workspace.resolve(strict=False)
+        normalized_workspace = workspace.resolve(strict=False)
+        normalized = Path(os.path.normcase(str(normalized_workspace)).casefold())
         if normalized in workspaces:
             raise SupervisionValidationError("workspace values must be unique")
         if any(
@@ -294,25 +296,36 @@ def run_supervised(
         if results[run.run_id].status == "succeeded":
             return
         if cancellation.is_set():
-            update(
-                RunResult(
-                    run.run_id,
-                    "not_started",
-                    str(Path(run.workspace).resolve(strict=False)),
-                    str(_output_path(root, run.run_id)),
-                    0,
-                    None,
-                    None,
-                )
-            )
+            update(_not_started_result(run, root))
             return
-        result = _run_one(run, root, plan, cancellation)
+        try:
+            result = _run_one(run, root, plan, cancellation)
+        except Exception as exc:
+            result = _result(
+                run,
+                Path(run.workspace),
+                _output_path(root, run.run_id),
+                "failed",
+                0,
+                None,
+                f"worker failed: {exc.__class__.__name__}",
+            )
         update(result)
 
-    with ThreadPoolExecutor(max_workers=plan.max_concurrency) as pool:
-        futures = [pool.submit(worker, run) for run in plan.runs]
-        for future in futures:
-            future.result()
+    try:
+        with ThreadPoolExecutor(max_workers=plan.max_concurrency) as pool:
+            futures = [pool.submit(worker, run) for run in plan.runs]
+            try:
+                for future in futures:
+                    future.result()
+            except BaseException:
+                cancellation.set()
+                raise
+    except BaseException:
+        cancellation.set()
+        with lock:
+            persist()
+        raise
     with lock:
         persist()
     return SupervisionManifest(
@@ -407,6 +420,7 @@ def _run_one(
                     stderr=subprocess.STDOUT,
                     env=os.environ.copy(),
                     start_new_session=True,
+                    stdin=subprocess.DEVNULL,
                 )
             except OSError as exc:
                 return _result(
@@ -425,7 +439,7 @@ def _run_one(
             )
         if exit_code == 0:
             return _result(run, workspace, output_path, "succeeded", attempts, 0, None)
-        rate_limited = _is_rate_limited(exit_code, output_path)
+        rate_limited = _is_rate_limited(exit_code)
         if rate_limited and attempts <= plan.rate_limit_retries:
             if _wait_for_retry(plan.rate_limit_delay, cancellation):
                 return _result(
@@ -452,23 +466,25 @@ def _wait_for_process(
             return process.wait(timeout=0.05)
         except subprocess.TimeoutExpired:
             if cancellation.is_set():
-                _terminate_process_group(process)
+                _terminate_process_group(process, process.pid)
                 return process.wait()
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+def _terminate_process_group(process: subprocess.Popen[bytes], pgid: int) -> None:
     if hasattr(os, "killpg"):
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    else:
+    elif process.poll() is None:
         process.terminate()
         try:
             process.wait(timeout=1)
@@ -484,15 +500,8 @@ def _wait_for_retry(delay: float, cancellation: threading.Event) -> bool:
     return cancellation.is_set()
 
 
-def _is_rate_limited(exit_code: int, output_path: Path) -> bool:
-    if exit_code == _RATE_LIMIT_EXIT:
-        return True
-    try:
-        text = output_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    lowered = text.lower()
-    return "429" in lowered or "rate limit" in lowered or "rate_limit" in lowered
+def _is_rate_limited(exit_code: int) -> bool:
+    return exit_code == _RATE_LIMIT_EXIT
 
 
 def _result(

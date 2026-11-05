@@ -339,3 +339,99 @@ def test_cli_signal_cancels_owned_children_and_records_pending_rows(tmp_path):
     )
     assert manifest["cancelled"] is True
     assert {row["status"] for row in manifest["runs"]} <= {"cancelled", "not_started"}
+
+
+def test_cli_defaults_concurrency_for_two_runs(tmp_path):
+    runs = tuple(
+        RunSpec(run_id, _command("pass"), tmp_path / f"{run_id}-workspace")
+        for run_id in ("one", "two")
+    )
+    plan_path = tmp_path / "plan.json"
+    output_root = tmp_path / "results"
+    payload = {
+        "version": "supervision-plan/v1",
+        "runs": [
+            {
+                "run_id": run.run_id,
+                "command": list(run.command),
+                "workspace": str(run.workspace),
+            }
+            for run in runs
+        ],
+    }
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    completed = _run_cli(plan_path, output_root)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_validate_plan_rejects_case_only_run_id_and_workspace_collisions(tmp_path):
+    runs = (
+        RunSpec("Build", _command("pass"), tmp_path / "Work"),
+        RunSpec("build", _command("pass"), tmp_path / "work"),
+    )
+
+    with pytest.raises(SupervisionValidationError, match="unique"):
+        validate_plan(SupervisionPlan(runs, max_concurrency=2))
+
+
+def test_validate_plan_rejects_case_only_workspace_collision(tmp_path):
+    runs = (
+        RunSpec("one", _command("pass"), tmp_path / "Work"),
+        RunSpec("two", _command("pass"), tmp_path / "work"),
+    )
+
+    with pytest.raises(SupervisionValidationError, match="workspace"):
+        validate_plan(SupervisionPlan(runs, max_concurrency=2))
+
+
+def test_cli_records_worker_workspace_creation_failure(tmp_path, monkeypatch):
+    import importlib.util
+
+    from ai_orchestration import supervisor
+
+    run = RunSpec("broken", _command("pass"), tmp_path / "workspace")
+    plan_path = tmp_path / "plan.json"
+    output_root = tmp_path / "results"
+    _write_plan(plan_path, (run,), max_concurrency=1)
+    module_spec = importlib.util.spec_from_file_location(
+        "supervise_orchestration",
+        Path("scripts/supervise_orchestration.py").resolve(),
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    script = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(script)
+    original_mkdir = Path.mkdir
+
+    def fail_workspace_mkdir(path, *args, **kwargs):
+        if path == run.workspace:
+            raise OSError("workspace creation denied")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(supervisor.Path, "mkdir", fail_workspace_mkdir)
+    exit_code = script.main(
+        ["--plan", str(plan_path), "--output-root", str(output_root)]
+    )
+    manifest = json.loads(
+        (output_root / "supervision-result.json").read_text(encoding="utf-8")
+    )
+
+    assert exit_code == 1
+    assert manifest["runs"][0]["status"] == "failed"
+    assert manifest["runs"][0]["error"] == "worker failed: OSError"
+
+
+def test_failed_child_with_429_output_is_not_rate_limited(tmp_path):
+    run = RunSpec(
+        "ordinary-failure",
+        _command("print('429'); raise SystemExit(3)"),
+        tmp_path / "workspace",
+    )
+
+    manifest = run_supervised(
+        SupervisionPlan((run,), max_concurrency=1),
+        tmp_path / "results",
+    )
+
+    assert manifest.result_for(run.run_id).status == "failed"

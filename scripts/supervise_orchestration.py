@@ -65,7 +65,7 @@ def _read_plan(path: Path) -> SupervisionPlan:
     try:
         return SupervisionPlan(
             tuple(runs),
-            payload.get("max_concurrency", 4),
+            payload.get("max_concurrency", min(4, len(runs))),
             payload.get("rate_limit_retries", 0),
             payload.get("rate_limit_delay", 0.0),
         )
