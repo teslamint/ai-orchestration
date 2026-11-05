@@ -10,7 +10,7 @@
   - `engine/` (durable state, approval gates, review/fix and Ralph Wiggum loops,
     stage registry, `CommandExecutor`).
 - `workspace/<project_name>/` holds generated projects in isolated directories.
-- `pyproject.toml` defines runtime dependencies and Python version (3.10+).
+- `pyproject.toml` defines runtime dependencies and Python version (3.11+).
 
 ## Build, Test, and Development Commands
 - `ai-orchestration "<goal>"` - 기본 실행 (설치된 콘솔 스크립트)
