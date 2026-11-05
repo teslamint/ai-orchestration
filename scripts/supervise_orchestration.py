@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ai_orchestration.supervisor import (
     RunSpec,
+    SupervisionPersistenceError,
     SupervisionPlan,
     SupervisionValidationError,
     run_supervised,
@@ -132,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
                 resume=args.resume,
                 cancel_event=cancellation,
             )
+        except SupervisionPersistenceError as exc:
+            print(f"supervision error: {exc}", file=sys.stderr)
+            return 1
         except (OSError, SupervisionValidationError) as exc:
             print(f"configuration error: {exc}", file=sys.stderr)
             return 2

@@ -10,14 +10,24 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from ai_orchestration.supervisor import (
     RunSpec,
     SupervisionPlan,
     run_supervised,
 )
+def _wait_for_path(path: Path, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.02)
+    return path.exists()
 
 
-def _timed_command(run_id: str, outcome: str, delay: float = 0.05) -> tuple[str, ...]:
+
+
+def _timed_command(run_id: str, outcome: str, delay: float = 0.15) -> tuple[str, ...]:
     exit_statement = {
         "success": "",
         "failed": "raise SystemExit(7)",
@@ -59,7 +69,7 @@ def test_supervisor_isolates_concurrent_children(tmp_path):
             _python_command(
                 "from pathlib import Path; import time; "
                 f"Path('identity').write_text({f'isolated-{index}'!r}); "
-                "Path('started').write_text(str(time.time())); time.sleep(0.08); "
+                "Path('started').write_text(str(time.time())); time.sleep(0.2); "
                 "Path('finished').write_text(str(time.time()))"
             ),
             tmp_path / "workspaces" / f"run-{index}",
@@ -134,11 +144,21 @@ def test_supervisor_cancellation_resume_preserves_completed_runs(tmp_path):
     )
     plan = SupervisionPlan((fast, *slow_runs), max_concurrency=1)
     cancellation = threading.Event()
-    timer = threading.Timer(0.2, cancellation.set)
-    timer.start()
+
+    def cancel_after_slow_run_starts():
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if any((run.workspace / "started").exists() for run in slow_runs):
+                cancellation.set()
+                return
+            time.sleep(0.02)
+        cancellation.set()
+
+    waiter = threading.Thread(target=cancel_after_slow_run_starts)
+    waiter.start()
     output_root = tmp_path / "results"
     cancelled = run_supervised(plan, output_root, cancel_event=cancellation)
-    timer.join()
+    waiter.join()
 
     assert cancelled.exit_code == 130
     assert cancelled.result_for("fast").status == "succeeded"
@@ -226,8 +246,11 @@ def test_supervisor_keyboard_interrupt_cancels_running_child_group(tmp_path):
         "time.sleep(30)"
     )
     run = RunSpec("interrupt", _python_command(code), tmp_path / "workspace")
-    timer = threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT))
-    timer.daemon = True
+    def interrupt_after_child_starts():
+        if _wait_for_path(pid_path):
+            os.kill(os.getpid(), signal.SIGINT)
+
+    timer = threading.Thread(target=interrupt_after_child_starts, daemon=True)
     timer.start()
 
     try:
@@ -263,8 +286,49 @@ def test_terminate_process_group_kills_grandchild_after_leader_exits(tmp_path):
         _python_command(code),
         start_new_session=True,
     )
-    process.wait(timeout=3)
+    process.wait(timeout=10)
     _terminate_process_group(process, process.pid)
-    time.sleep(1.2)
-
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not marker.exists():
+        time.sleep(0.02)
     assert not marker.exists()
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_supervisor_kills_grandchild_before_return(tmp_path, cancel):
+    pid_file = tmp_path / "workspace" / "grandchild.pid"
+    run = RunSpec(
+        "grandchild",
+        ("sh", "-c", "sleep 300 & echo $! > grandchild.pid; sleep 1"),
+        pid_file.parent,
+    )
+    cancellation = threading.Event()
+
+    def cancel_after_grandchild_starts():
+        if _wait_for_path(pid_file):
+            cancellation.set()
+
+    timer = threading.Thread(target=cancel_after_grandchild_starts)
+    if cancel:
+        timer.start()
+
+    result = run_supervised(
+        SupervisionPlan((run,), max_concurrency=1),
+        tmp_path / "results",
+        cancel_event=cancellation,
+    )
+    if cancel:
+        timer.join()
+
+    assert result.result_for("grandchild").status == (
+        "cancelled" if cancel else "succeeded"
+    )
+    grandchild_pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("grandchild survived run_supervised")

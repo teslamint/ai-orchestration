@@ -22,6 +22,13 @@ from ai_orchestration.supervisor import (
 
 def _command(code: str) -> tuple[str, ...]:
     return (sys.executable, "-c", code)
+def _wait_for_path(path: Path, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.02)
+    return path.exists()
 
 
 def _plan(tmp_path: Path, count: int = 4, *, concurrency: int = 2):
@@ -31,7 +38,7 @@ def _plan(tmp_path: Path, count: int = 4, *, concurrency: int = 2):
             command=_command(
                 "from pathlib import Path; import time; "
                 "Path('started').write_text(str(time.time())); "
-                "time.sleep(0.12); "
+                "time.sleep(0.25); "
                 "Path('finished').write_text(str(time.time()))"
             ),
             workspace=tmp_path / f"workspace-{index}",
@@ -308,7 +315,10 @@ def test_cli_signal_cancels_owned_children_and_records_pending_rows(tmp_path):
     runs = tuple(
         RunSpec(
             f"run-{index}",
-            _command("import time; time.sleep(5)"),
+            _command(
+                "from pathlib import Path; import time; "
+                "Path('started').touch(); time.sleep(30)"
+            ),
             tmp_path / f"workspace-{index}",
         )
         for index in range(2)
@@ -329,7 +339,9 @@ def test_cli_signal_cancels_owned_children_and_records_pending_rows(tmp_path):
         stderr=subprocess.PIPE,
         text=True,
     )
-    time.sleep(0.25)
+    if not _wait_for_path(runs[0].workspace / "started"):
+        process.kill()
+        raise AssertionError("supervised child did not start before deadline")
     process.send_signal(signal.SIGINT)
     stdout, stderr = process.communicate(timeout=10)
 
@@ -435,3 +447,124 @@ def test_failed_child_with_429_output_is_not_rate_limited(tmp_path):
     )
 
     assert manifest.result_for(run.run_id).status == "failed"
+def test_library_default_concurrency_adapts_to_run_count(tmp_path):
+    plan = SupervisionPlan(
+        (RunSpec("one", _command("pass"), tmp_path / "one"),)
+    )
+
+    validate_plan(plan)
+
+    assert plan.max_concurrency == 1
+
+
+def test_post_dispatch_manifest_failure_does_not_cancel_siblings(tmp_path, monkeypatch):
+    from ai_orchestration import supervisor
+
+    failed = RunSpec(
+        "manifest-fails",
+        _command("import time; time.sleep(0.1); raise SystemExit(1)"),
+        tmp_path / "failed",
+    )
+    healthy = RunSpec(
+        "healthy-after-manifest-failure",
+        _command(
+            "import time; from pathlib import Path; time.sleep(0.3); "
+            "Path('completed').touch()"
+        ),
+        tmp_path / "healthy",
+    )
+    original_write = supervisor._write_manifest
+    failed_once = False
+
+    def fail_terminal_write(path, payload):
+        nonlocal failed_once
+        if (
+            not failed_once
+            and any(row["status"] == "failed" for row in payload["runs"])
+        ):
+            failed_once = True
+            raise OSError("manifest unavailable")
+        return original_write(path, payload)
+
+    monkeypatch.setattr(supervisor, "_write_manifest", fail_terminal_write)
+
+    with pytest.raises(supervisor.SupervisionPersistenceError):
+        run_supervised(
+            SupervisionPlan((failed, healthy), max_concurrency=2),
+            tmp_path / "results",
+        )
+
+    assert failed_once
+    assert (healthy.workspace / "completed").exists()
+def test_cli_reports_post_dispatch_persistence_failure_as_run_error(
+    tmp_path, monkeypatch, capsys
+):
+    import importlib.util
+
+    from ai_orchestration import supervisor
+
+    run = RunSpec("broken-manifest", _command("raise SystemExit(1)"), tmp_path / "run")
+    plan_path = tmp_path / "plan.json"
+    output_root = tmp_path / "results"
+    _write_plan(plan_path, (run,), max_concurrency=1)
+    module_spec = importlib.util.spec_from_file_location(
+        "supervise_orchestration",
+        Path("scripts/supervise_orchestration.py").resolve(),
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    script = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(script)
+    original_write = supervisor._write_manifest
+
+    def fail_terminal_write(path, payload):
+        if any(row["status"] == "failed" for row in payload["runs"]):
+            raise OSError("manifest unavailable")
+        return original_write(path, payload)
+
+    monkeypatch.setattr(supervisor, "_write_manifest", fail_terminal_write)
+
+    exit_code = script.main(
+        ["--plan", str(plan_path), "--output-root", str(output_root)]
+    )
+
+    assert exit_code == 1
+    assert "configuration error" not in capsys.readouterr().err
+
+
+def test_output_root_overlap_check_is_case_insensitive(tmp_path, monkeypatch):
+    from ai_orchestration import supervisor
+
+    output_root = tmp_path / "results"
+    workspace = tmp_path / "RESULTS" / "workspace"
+    run = RunSpec("overlap", _command("pass"), workspace)
+    original_resolve = Path.resolve
+
+    def preserve_workspace_case(path, *args, **kwargs):
+        if path == workspace:
+            return workspace
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(supervisor.Path, "resolve", preserve_workspace_case)
+
+    with pytest.raises(SupervisionValidationError, match="overlaps output root"):
+        run_supervised(SupervisionPlan((run,)), output_root)
+def test_worker_exception_row_uses_resolved_workspace_and_can_resume(
+    tmp_path, monkeypatch
+):
+    from ai_orchestration import supervisor
+
+    workspace = tmp_path / "parent" / ".." / "workspace"
+    run = RunSpec("worker-error", _command("pass"), workspace)
+    output_root = tmp_path / "results"
+
+    def fail_run_one(*args, **kwargs):
+        raise RuntimeError("simulated worker failure")
+
+    monkeypatch.setattr(supervisor, "_run_one", fail_run_one)
+    failed = run_supervised(SupervisionPlan((run,)), output_root)
+    assert failed.results[0].workspace == str(workspace.resolve(strict=False))
+
+    monkeypatch.undo()
+    resumed = run_supervised(SupervisionPlan((run,)), output_root, resume=True)
+
+    assert resumed.result_for(run.run_id).status == "succeeded"

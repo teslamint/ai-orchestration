@@ -21,6 +21,10 @@ _ERROR_LIMIT = 160
 _STATUSES = {"succeeded", "failed", "rate_limited", "cancelled", "not_started"}
 
 
+class SupervisionPersistenceError(RuntimeError):
+    """A manifest write failed after child runs were dispatched."""
+
+
 class SupervisionValidationError(ValueError):
     """A supervision plan cannot be dispatched safely."""
 
@@ -46,12 +50,14 @@ class RunSpec:
 @dataclass(frozen=True)
 class SupervisionPlan:
     runs: tuple[RunSpec, ...]
-    max_concurrency: int = 4
+    max_concurrency: int | None = None
     rate_limit_retries: int = 0
     rate_limit_delay: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "runs", tuple(self.runs))
+        if self.max_concurrency is None:
+            object.__setattr__(self, "max_concurrency", min(4, len(self.runs)))
 
 
 @dataclass(frozen=True)
@@ -249,7 +255,11 @@ def run_supervised(
     runs_root.mkdir(parents=True, exist_ok=True)
     for run in plan.runs:
         workspace = Path(run.workspace).resolve(strict=False)
-        if _is_relative_to(workspace, root) or _is_relative_to(root, workspace):
+        normalized_workspace = Path(os.path.normcase(str(workspace)).casefold())
+        normalized_root = Path(os.path.normcase(str(root)).casefold())
+        if _is_relative_to(normalized_workspace, normalized_root) or _is_relative_to(
+            normalized_root, normalized_workspace
+        ):
             raise SupervisionValidationError(
                 f"workspace for {run.run_id} overlaps output root"
             )
@@ -287,10 +297,18 @@ def run_supervised(
 
     persist()
 
+    def persist_after_dispatch(run_id: str) -> None:
+        try:
+            persist()
+        except OSError as exc:
+            raise SupervisionPersistenceError(
+                f"could not persist result for {run_id}"
+            ) from exc
+
     def update(result: RunResult) -> None:
         with lock:
             results[result.run_id] = result
-            persist()
+            persist_after_dispatch(result.run_id)
 
     def worker(run: RunSpec) -> None:
         if results[run.run_id].status == "succeeded":
@@ -303,7 +321,7 @@ def run_supervised(
         except Exception as exc:
             result = _result(
                 run,
-                Path(run.workspace),
+                Path(run.workspace).resolve(strict=False),
                 _output_path(root, run.run_id),
                 "failed",
                 0,
@@ -315,19 +333,27 @@ def run_supervised(
     try:
         with ThreadPoolExecutor(max_workers=plan.max_concurrency) as pool:
             futures = [pool.submit(worker, run) for run in plan.runs]
-            try:
-                for future in futures:
+            persistence_error = None
+            for future in futures:
+                try:
                     future.result()
-            except BaseException:
-                cancellation.set()
-                raise
+                except SupervisionPersistenceError as exc:
+                    if persistence_error is None:
+                        persistence_error = exc
+                except BaseException:
+                    cancellation.set()
+                    raise
+            if persistence_error is not None:
+                raise persistence_error
+    except SupervisionPersistenceError:
+        raise
     except BaseException:
         cancellation.set()
         with lock:
-            persist()
+            persist_after_dispatch("cancellation")
         raise
     with lock:
-        persist()
+        persist_after_dispatch("final manifest")
     return SupervisionManifest(
         tuple(results[run.run_id] for run in plan.runs),
         manifest_path,
@@ -433,6 +459,7 @@ def _run_one(
                     f"process start failed: {exc.__class__.__name__}",
                 )
             exit_code = _wait_for_process(process, cancellation)
+            _terminate_process_group(process, process.pid)
         if cancellation.is_set():
             return _result(
                 run, workspace, output_path, "cancelled", attempts, exit_code, None
