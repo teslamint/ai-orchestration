@@ -2,7 +2,7 @@
 
 - Spec: `docs/specs/2026-08-30-prompt-payload-measurement-design.md`
 - Plan: `docs/plans/2026-08-30-001-feat-prompt-payload-measurement-plan.md`
-- Source commit before U3 evidence: `fe2642b`
+- Source commit before U3 evidence: `e19ea58`
 - Captured: `2026-08-30`
 - Fixture: disposable `CallRecorder` event stream under `/private/tmp`
 - External model calls: none

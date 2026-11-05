@@ -10,7 +10,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from ai_orchestration.providers.call_events import CallEvent, read_call_events
+from ai_orchestration.providers.call_events import (
+    CallEvent,
+    read_call_events_snapshot,
+)
 
 _MIGRATION_GATE = "requires an approved migration spec and a repeated before-after eval"
 
@@ -48,10 +51,9 @@ def measure_prompt_payloads(path: Path) -> PromptMeasurementReport:
     if source.is_symlink():
         raise ValueError(f"call-event path must not be a symlink: {source}")
     try:
-        source_bytes = source.read_bytes()
+        source_bytes, events = read_call_events_snapshot(source)
     except OSError as exc:
         raise ValueError(f"call-event file is unreadable: {source}") from exc
-    events = read_call_events(source)
     groups: defaultdict[tuple[str, str], list[CallEvent]] = defaultdict(list)
     calls: list[dict[str, object]] = []
     for ordinal, event in enumerate(events, 1):

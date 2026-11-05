@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from ai_orchestration.evals import prompt_measurement
 from ai_orchestration.evals.prompt_measurement import (
     PromptMeasurementReport,
     measure_prompt_payloads,
@@ -115,6 +116,37 @@ def test_measurement_ranks_groups_and_preserves_unavailable_usage(tmp_path):
         "latency_ms_total": 30,
         "usage_available_events": 1,
     }
+
+
+def test_measurement_hashes_the_exact_snapshot_it_parses(tmp_path, monkeypatch):
+    source = tmp_path / "call_events.jsonl"
+    original = _write_events(source, _events())
+    appended = _write_events(tmp_path / "appended.jsonl", _events(prompt_delta=8))
+    original_read = prompt_measurement.read_call_events_snapshot
+
+    def append_before_read(path):
+        with source.open("ab") as stream:
+            stream.write(appended)
+        return original_read(path)
+
+    monkeypatch.setattr(
+        prompt_measurement, "read_call_events_snapshot", append_before_read
+    )
+
+    report = measure_prompt_payloads(source)
+
+    assert report.source_sha256 == hashlib.sha256(original + appended).hexdigest()
+    assert report.event_count == len(_events()) * 2
+
+
+def test_missing_source_fails_without_writing_report(tmp_path):
+    source = tmp_path / "missing.jsonl"
+    output = tmp_path / "measurement.json"
+
+    with pytest.raises(ValueError, match="unreadable"):
+        write_measurement_report(source, output)
+
+    assert not output.exists()
 
 
 def test_measurement_is_byte_stable_and_observes_only_prompt_size(tmp_path):
